@@ -1,0 +1,201 @@
+timestamp,product_name,product_category,units_sold,price_per_unit,discount_percent,customer_region,demand_trend_index,season,event_flag
+2023-01-01,Milk,FMCG,32,14836.18,7,South,0.4,Summer,None
+2023-01-02,Laptop,Electronics,236,655.02,2,South,0.46,Summer,Diwali
+2023-01-03,Laptop,Electronics,234,4424.4,18,East,0.87,Summer,Diwali
+2023-01-04,Paracetamol,Pharma,194,5571.87,6,East,0.37,Festive,None
+2023-01-05,Mobile Phone,Electronics,196,12082.45,1,West,0.68,Festive,None
+2023-01-06,Laptop,Electronics,170,16591.51,19,East,0.7,Summer,None
+2023-01-07,Rice,FMCG,168,19704.73,7,North,0.57,Festive,Sale
+2023-01-08,Rice,FMCG,209,7118.31,8,North,0.73,Winter,Diwali
+2023-01-09,Rice,FMCG,256,7601.52,20,South,0.78,Summer,Diwali
+2023-01-10,Milk,FMCG,181,8035.27,2,South,0.94,Monsoon,Diwali
+2023-01-11,Paracetamol,Pharma,222,17695.97,20,West,0.4,Winter,Diwali
+2023-01-12,Laptop,Electronics,295,5269.58,18,West,0.93,Festive,Sale
+2023-01-13,Rice,FMCG,90,10200.34,2,North,0.9,Winter,Diwali
+2023-01-14,Paracetamol,Pharma,52,7707.65,19,West,0.67,Summer,None
+2023-01-15,Laptop,Electronics,156,15376.6,10,North,0.51,Winter,New Year
+2023-01-16,Milk,FMCG,154,19438.32,5,North,0.91,Monsoon,Diwali
+2023-01-17,Rice,FMCG,211,15254.97,17,North,0.72,Festive,None
+2023-01-18,Milk,FMCG,205,17576.86,9,South,0.34,Summer,None
+2023-01-19,Paracetamol,Pharma,55,19560.13,17,South,0.39,Festive,Diwali
+2023-01-20,Mobile Phone,Electronics,290,17451.21,13,South,0.95,Winter,Sale
+2023-01-21,Paracetamol,Pharma,211,8773.24,16,West,0.38,Winter,None
+2023-01-22,Mobile Phone,Electronics,30,11774.41,7,South,0.31,Summer,Diwali
+2023-01-23,Milk,FMCG,36,17195.52,2,South,0.49,Festive,Diwali
+2023-01-24,Laptop,Electronics,87,14472.58,18,West,0.47,Festive,New Year
+2023-01-25,Rice,FMCG,68,1956.68,13,East,0.6,Festive,None
+2023-01-26,Milk,FMCG,51,8064.37,10,North,0.47,Winter,New Year
+2023-01-27,Rice,FMCG,236,3686.09,14,South,0.91,Summer,New Year
+2023-01-28,Laptop,Electronics,70,1030.75,17,North,0.98,Winter,Diwali
+2023-01-29,Paracetamol,Pharma,268,9637.54,12,North,0.42,Summer,New Year
+2023-01-30,Mobile Phone,Electronics,252,5719.28,17,West,0.41,Monsoon,Diwali
+2023-01-31,Milk,FMCG,297,1237.93,10,North,0.34,Festive,Diwali
+2023-02-01,Milk,FMCG,280,1620.63,5,North,0.72,Winter,New Year
+2023-02-02,Milk,FMCG,146,11586.8,1,North,0.59,Monsoon,Sale
+2023-02-03,Rice,FMCG,180,4788.95,12,South,0.77,Monsoon,New Year
+2023-02-04,Mobile Phone,Electronics,57,206.12,19,North,0.35,Winter,Sale
+2023-02-05,Rice,FMCG,198,17619.67,7,East,0.5,Festive,Sale
+2023-02-06,Laptop,Electronics,290,176.31,17,East,0.95,Summer,Diwali
+2023-02-07,Mobile Phone,Electronics,79,17796.46,17,South,0.49,Winter,Sale
+2023-02-08,Rice,FMCG,155,10118.07,8,North,0.36,Festive,Sale
+2023-02-09,Milk,FMCG,21,6684.46,4,East,0.41,Festive,New Year
+2023-02-10,Laptop,Electronics,24,2255.24,4,North,0.88,Winter,New Year
+2023-02-11,Rice,FMCG,41,6179.0,1,East,0.45,Winter,None
+2023-02-12,Mobile Phone,Electronics,228,19477.26,4,South,0.91,Winter,New Year
+2023-02-13,Milk,FMCG,111,14736.56,10,West,0.86,Winter,Sale
+2023-02-14,Rice,FMCG,75,7663.18,1,West,0.46,Festive,Sale
+2023-02-15,Mobile Phone,Electronics,136,4474.01,6,West,0.53,Summer,Sale
+2023-02-16,Mobile Phone,Electronics,280,8005.57,17,East,0.96,Summer,Sale
+2023-02-17,Rice,FMCG,155,784.38,19,West,0.54,Monsoon,New Year
+2023-02-18,Laptop,Electronics,281,2330.6,18,South,0.48,Festive,None
+2023-02-19,Laptop,Electronics,295,13743.41,6,East,0.6,Monsoon,Sale
+2023-02-20,Milk,FMCG,173,10152.31,13,East,0.58,Monsoon,Diwali
+2023-02-21,Rice,FMCG,235,13305.29,12,South,0.73,Monsoon,New Year
+2023-02-22,Laptop,Electronics,20,6091.42,6,West,0.85,Monsoon,New Year
+2023-02-23,Paracetamol,Pharma,246,13519.03,16,West,0.86,Winter,None
+2023-02-24,Mobile Phone,Electronics,283,13283.8,19,East,0.37,Winter,Sale
+2023-02-25,Rice,FMCG,121,2964.13,1,South,0.99,Summer,New Year
+2023-02-26,Paracetamol,Pharma,119,14372.55,12,West,0.58,Winter,None
+2023-02-27,Milk,FMCG,237,4392.45,16,West,0.34,Winter,None
+2023-02-28,Paracetamol,Pharma,88,16032.3,16,East,0.97,Festive,New Year
+2023-03-01,Laptop,Electronics,248,17946.22,15,West,0.48,Winter,Sale
+2023-03-02,Laptop,Electronics,268,12542.43,8,West,0.35,Monsoon,Diwali
+2023-03-03,Mobile Phone,Electronics,191,6407.8,17,North,0.4,Winter,New Year
+2023-03-04,Rice,FMCG,129,1303.29,13,East,0.68,Festive,None
+2023-03-05,Rice,FMCG,235,7801.75,18,North,0.9,Festive,New Year
+2023-03-06,Milk,FMCG,200,5986.28,12,West,0.68,Winter,New Year
+2023-03-07,Rice,FMCG,159,8728.0,0,West,0.54,Festive,Diwali
+2023-03-08,Paracetamol,Pharma,85,19614.83,17,North,0.93,Summer,None
+2023-03-09,Paracetamol,Pharma,89,17339.69,5,North,0.48,Monsoon,Diwali
+2023-03-10,Paracetamol,Pharma,187,6763.26,12,East,0.83,Festive,Sale
+2023-03-11,Milk,FMCG,260,407.28,17,North,1.0,Monsoon,Diwali
+2023-03-12,Milk,FMCG,40,15089.58,7,South,0.89,Winter,Diwali
+2023-03-13,Rice,FMCG,262,13395.79,18,South,0.63,Monsoon,Sale
+2023-03-14,Rice,FMCG,78,15560.28,5,East,0.38,Summer,Sale
+2023-03-15,Laptop,Electronics,212,7945.16,6,North,0.71,Winter,None
+2023-03-16,Mobile Phone,Electronics,81,15928.62,18,North,0.54,Festive,Sale
+2023-03-17,Milk,FMCG,279,12957.91,0,West,0.88,Summer,New Year
+2023-03-18,Mobile Phone,Electronics,255,14152.03,13,South,0.81,Monsoon,New Year
+2023-03-19,Paracetamol,Pharma,243,16518.18,18,East,0.53,Winter,None
+2023-03-20,Mobile Phone,Electronics,250,4892.39,14,West,0.54,Festive,Sale
+2023-03-21,Rice,FMCG,269,4258.15,8,East,0.5,Monsoon,None
+2023-03-22,Laptop,Electronics,117,1730.55,13,West,0.69,Winter,New Year
+2023-03-23,Paracetamol,Pharma,249,15862.8,2,East,0.46,Winter,Sale
+2023-03-24,Laptop,Electronics,208,9475.74,16,East,0.6,Monsoon,Sale
+2023-03-25,Paracetamol,Pharma,158,6146.33,7,North,0.8,Monsoon,None
+2023-03-26,Laptop,Electronics,114,3846.99,15,East,0.81,Monsoon,None
+2023-03-27,Rice,FMCG,171,4565.11,5,East,0.31,Winter,Sale
+2023-03-28,Milk,FMCG,47,11076.11,4,West,0.37,Summer,Sale
+2023-03-29,Paracetamol,Pharma,265,8820.57,5,North,0.48,Festive,None
+2023-03-30,Milk,FMCG,225,9845.1,18,North,0.41,Monsoon,None
+2023-03-31,Rice,FMCG,80,11170.3,13,South,0.84,Festive,New Year
+2023-04-01,Paracetamol,Pharma,172,17206.13,13,East,0.7,Summer,None
+2023-04-02,Rice,FMCG,128,5307.63,2,South,0.47,Summer,Diwali
+2023-04-03,Milk,FMCG,229,9021.06,19,West,0.5,Winter,Sale
+2023-04-04,Mobile Phone,Electronics,252,1442.17,7,East,0.85,Winter,New Year
+2023-04-05,Milk,FMCG,298,4511.69,4,East,0.88,Summer,None
+2023-04-06,Rice,FMCG,177,11908.98,18,East,0.61,Festive,Sale
+2023-04-07,Paracetamol,Pharma,159,10019.43,15,West,0.36,Summer,New Year
+2023-04-08,Mobile Phone,Electronics,148,536.78,7,North,1.0,Monsoon,None
+2023-04-09,Rice,FMCG,260,10388.9,14,East,0.43,Festive,New Year
+2023-04-10,Milk,FMCG,260,6972.26,10,East,0.77,Winter,Sale
+2023-04-11,Paracetamol,Pharma,273,5778.59,12,North,0.62,Monsoon,Sale
+2023-04-12,Mobile Phone,Electronics,79,19404.29,12,North,0.76,Festive,New Year
+2023-04-13,Milk,FMCG,116,10378.42,19,West,0.74,Summer,Diwali
+2023-04-14,Mobile Phone,Electronics,87,18554.9,14,West,0.38,Winter,Diwali
+2023-04-15,Mobile Phone,Electronics,27,11053.98,2,South,0.99,Summer,New Year
+2023-04-16,Milk,FMCG,98,9977.54,9,East,0.59,Festive,New Year
+2023-04-17,Rice,FMCG,253,11034.28,12,South,0.95,Winter,None
+2023-04-18,Mobile Phone,Electronics,232,6810.71,16,East,0.87,Monsoon,Sale
+2023-04-19,Laptop,Electronics,270,17307.91,14,West,0.54,Festive,New Year
+2023-04-20,Mobile Phone,Electronics,116,19615.88,7,West,0.46,Festive,None
+2023-04-21,Mobile Phone,Electronics,262,14110.45,12,West,0.99,Winter,New Year
+2023-04-22,Milk,FMCG,84,10055.78,18,East,0.91,Festive,None
+2023-04-23,Laptop,Electronics,253,326.65,4,West,0.91,Winter,None
+2023-04-24,Paracetamol,Pharma,155,6784.45,12,North,0.9,Festive,Sale
+2023-04-25,Paracetamol,Pharma,297,737.26,2,South,0.74,Monsoon,Diwali
+2023-04-26,Milk,FMCG,242,19567.19,20,North,0.61,Monsoon,None
+2023-04-27,Milk,FMCG,186,15926.95,9,East,0.56,Winter,Diwali
+2023-04-28,Laptop,Electronics,230,11327.24,5,South,0.42,Festive,Diwali
+2023-04-29,Paracetamol,Pharma,93,4659.13,20,East,0.62,Summer,New Year
+2023-04-30,Mobile Phone,Electronics,299,3176.35,14,East,0.99,Monsoon,New Year
+2023-05-01,Mobile Phone,Electronics,253,16909.17,6,West,0.9,Summer,Diwali
+2023-05-02,Paracetamol,Pharma,203,11504.74,9,North,0.98,Festive,Sale
+2023-05-03,Milk,FMCG,45,18214.13,15,East,0.84,Winter,Sale
+2023-05-04,Rice,FMCG,117,12425.41,4,North,0.93,Summer,Sale
+2023-05-05,Paracetamol,Pharma,37,11599.88,4,North,0.94,Monsoon,New Year
+2023-05-06,Rice,FMCG,122,2660.55,17,East,0.67,Monsoon,Diwali
+2023-05-07,Mobile Phone,Electronics,266,19348.33,9,East,0.86,Festive,None
+2023-05-08,Rice,FMCG,135,17205.61,12,East,0.36,Festive,None
+2023-05-09,Mobile Phone,Electronics,294,2489.3,11,East,0.71,Monsoon,None
+2023-05-10,Rice,FMCG,261,519.99,17,East,0.94,Winter,None
+2023-05-11,Paracetamol,Pharma,174,12991.8,3,South,0.33,Summer,Sale
+2023-05-12,Paracetamol,Pharma,79,1961.9,17,South,0.57,Monsoon,New Year
+2023-05-13,Laptop,Electronics,99,17710.57,20,North,0.88,Festive,Sale
+2023-05-14,Milk,FMCG,209,4361.05,14,South,0.9,Summer,Sale
+2023-05-15,Laptop,Electronics,203,1229.79,8,South,0.98,Festive,None
+2023-05-16,Rice,FMCG,30,1030.56,10,South,0.99,Winter,None
+2023-05-17,Laptop,Electronics,126,11735.93,7,East,0.84,Summer,Sale
+2023-05-18,Rice,FMCG,86,10813.5,5,North,0.76,Summer,Diwali
+2023-05-19,Milk,FMCG,203,15803.89,7,East,0.31,Monsoon,None
+2023-05-20,Rice,FMCG,235,10531.19,2,West,0.61,Monsoon,None
+2023-05-21,Paracetamol,Pharma,277,4446.56,19,North,0.81,Monsoon,New Year
+2023-05-22,Milk,FMCG,51,19971.76,12,West,0.78,Festive,New Year
+2023-05-23,Milk,FMCG,61,6455.79,4,North,0.39,Monsoon,New Year
+2023-05-24,Laptop,Electronics,291,5912.06,16,West,0.37,Summer,Diwali
+2023-05-25,Paracetamol,Pharma,251,17764.06,13,East,0.88,Festive,New Year
+2023-05-26,Milk,FMCG,180,8546.74,8,East,0.97,Festive,None
+2023-05-27,Milk,FMCG,63,1882.74,3,East,0.87,Summer,Sale
+2023-05-28,Milk,FMCG,230,7084.89,13,North,0.98,Monsoon,Sale
+2023-05-29,Milk,FMCG,279,4270.52,15,South,0.89,Monsoon,Sale
+2023-05-30,Milk,FMCG,162,11490.52,13,North,0.73,Monsoon,None
+2023-05-31,Rice,FMCG,159,14059.92,9,East,0.55,Winter,Diwali
+2023-06-01,Laptop,Electronics,225,1410.32,20,North,0.36,Winter,New Year
+2023-06-02,Paracetamol,Pharma,252,6831.1,11,East,0.81,Summer,None
+2023-06-03,Rice,FMCG,100,15093.63,1,North,0.49,Festive,New Year
+2023-06-04,Laptop,Electronics,246,8295.39,6,North,0.54,Summer,Sale
+2023-06-05,Laptop,Electronics,269,10548.14,9,North,0.45,Summer,None
+2023-06-06,Rice,FMCG,174,18907.58,4,East,0.5,Summer,None
+2023-06-07,Paracetamol,Pharma,240,3530.38,12,South,0.65,Monsoon,None
+2023-06-08,Paracetamol,Pharma,41,8735.67,14,North,0.9,Festive,New Year
+2023-06-09,Paracetamol,Pharma,168,2321.16,0,East,0.42,Festive,Sale
+2023-06-10,Milk,FMCG,243,16892.8,7,West,0.71,Summer,New Year
+2023-06-11,Mobile Phone,Electronics,193,4447.01,5,North,0.66,Summer,Diwali
+2023-06-12,Mobile Phone,Electronics,199,14553.03,20,South,0.47,Winter,Sale
+2023-06-13,Rice,FMCG,108,12055.93,20,North,0.42,Festive,New Year
+2023-06-14,Laptop,Electronics,249,13629.05,18,East,0.9,Monsoon,Diwali
+2023-06-15,Paracetamol,Pharma,54,9389.04,20,East,0.86,Summer,Sale
+2023-06-16,Laptop,Electronics,57,6221.95,14,North,0.34,Monsoon,None
+2023-06-17,Milk,FMCG,279,7701.96,18,North,0.61,Winter,Sale
+2023-06-18,Laptop,Electronics,263,10037.32,1,West,0.37,Monsoon,None
+2023-06-19,Laptop,Electronics,108,802.06,14,West,0.67,Winter,Sale
+2023-06-20,Mobile Phone,Electronics,164,7760.58,10,North,0.85,Monsoon,None
+2023-06-21,Mobile Phone,Electronics,68,11168.1,12,East,0.48,Winter,Sale
+2023-06-22,Milk,FMCG,92,18336.59,9,West,0.39,Summer,Sale
+2023-06-23,Laptop,Electronics,212,12877.0,10,South,0.77,Summer,New Year
+2023-06-24,Laptop,Electronics,205,384.25,9,South,0.97,Monsoon,New Year
+2023-06-25,Rice,FMCG,135,19999.53,4,North,0.51,Summer,None
+2023-06-26,Mobile Phone,Electronics,87,11952.98,4,South,0.43,Winter,New Year
+2023-06-27,Milk,FMCG,230,7298.7,7,West,0.73,Festive,Diwali
+2023-06-28,Laptop,Electronics,142,6203.17,15,South,0.56,Festive,New Year
+2023-06-29,Mobile Phone,Electronics,215,10068.08,13,South,0.87,Winter,Sale
+2023-06-30,Milk,FMCG,266,17484.86,17,North,0.8,Summer,Sale
+2023-07-01,Milk,FMCG,102,5470.37,16,South,0.88,Summer,Diwali
+2023-07-02,Paracetamol,Pharma,198,18610.83,13,North,0.58,Monsoon,Diwali
+2023-07-03,Paracetamol,Pharma,61,7510.76,0,East,0.95,Monsoon,Diwali
+2023-07-04,Rice,FMCG,39,5751.85,15,South,0.83,Festive,New Year
+2023-07-05,Laptop,Electronics,22,18119.03,0,East,0.45,Winter,New Year
+2023-07-06,Milk,FMCG,167,4768.05,3,North,0.47,Festive,None
+2023-07-07,Milk,FMCG,275,11942.85,0,South,0.8,Monsoon,New Year
+2023-07-08,Milk,FMCG,200,4826.47,13,South,0.77,Summer,Sale
+2023-07-09,Milk,FMCG,289,10890.76,16,North,0.57,Festive,None
+2023-07-10,Paracetamol,Pharma,211,5087.93,0,East,0.85,Monsoon,Diwali
+2023-07-11,Milk,FMCG,190,2685.52,11,East,0.87,Winter,New Year
+2023-07-12,Paracetamol,Pharma,113,16233.72,2,West,0.33,Winter,None
+2023-07-13,Rice,FMCG,41,6325.6,9,West,0.99,Festive,Sale
+2023-07-14,Milk,FMCG,117,5736.5,1,East,0.49,Monsoon,New Year
+2023-07-15,Paracetamol,Pharma,245,17894.86,12,East,0.98,Festive,New Year
+2023-07-16,Mobile Phone,Electronics,285,5349.08,2,West,0.36,Winter,Sale
+2023-07-17,Mobile Phone,Electronics,72,1619.78,9,East,0.61,Festive,Diwali
+2023-07-18,Paracetamol,Pharma,199,8953.65,11,West,0.49,Summer,None
+2023-07-19,Paracetamol,Pharma,206,10271.46,5,North,0.4,Festive,None
