@@ -1,0 +1,296 @@
+{
+  "system_context": {
+    "description": "This system analyzes supply chain data across four layers: Demand, Inventory, Supply, and Logistics. It enables demand forecasting, risk assessment, anomaly detection, inventory optimization, and supplier performance analysis.",
+    "layers": [
+      "Demand Layer: Tracks customer demand and sales trends",
+      "Inventory Layer: Monitors stock levels and warehouse conditions",
+      "Supply Layer: Evaluates supplier performance and delivery reliability",
+      "Logistics Layer: Analyzes transportation, delays, and route risks"
+    ]
+  },
+  "datasets": [
+    {
+      "dataset_name": "daily_product_demand",
+      "purpose": "Represents daily customer demand and sales behavior across products and regions for trend analysis and forecasting.",
+      "primary_use_cases": [
+        "Demand Forecasting",
+        "Seasonality Analysis",
+        "Stockout Prediction"
+      ],
+      "features": [
+        {
+          "name": "timestamp",
+          "type": "datetime",
+          "description": "Date of sales transaction (daily level)"
+        },
+        {
+          "name": "product_name",
+          "type": "categorical",
+          "description": "Name of the product sold"
+        },
+        {
+          "name": "product_category",
+          "type": "categorical",
+          "description": "Product category such as FMCG, Electronics, Pharma"
+        },
+        {
+          "name": "units_sold",
+          "type": "numerical",
+          "description": "Number of units sold per day"
+        },
+        {
+          "name": "price_per_unit",
+          "type": "numerical",
+          "description": "Selling price per unit"
+        },
+        {
+          "name": "discount_percent",
+          "type": "numerical",
+          "description": "Discount applied on product in percentage"
+        },
+        {
+          "name": "customer_region",
+          "type": "categorical",
+          "description": "Region where product is sold"
+        },
+        {
+          "name": "demand_trend_index",
+          "type": "numerical",
+          "description": "Normalized demand intensity between 0 and 1"
+        },
+        {
+          "name": "season",
+          "type": "categorical",
+          "description": "Season such as Summer, Winter, Monsoon, Festive"
+        },
+        {
+          "name": "event_flag",
+          "type": "categorical",
+          "description": "Special events like Diwali, Sale, or None"
+        }
+      ],
+      "relationships": ["product_name", "timestamp"]
+    },
+    {
+      "dataset_name": "warehouse_inventory",
+      "purpose": "Represents warehouse stock levels and storage conditions for inventory monitoring and optimization.",
+      "primary_use_cases": [
+        "Inventory Optimization",
+        "Stock Monitoring",
+        "Stockout Prediction"
+      ],
+      "features": [
+        {
+          "name": "warehouse_id",
+          "type": "categorical",
+          "description": "Unique warehouse identifier"
+        },
+        {
+          "name": "warehouse_location",
+          "type": "categorical",
+          "description": "Location of warehouse"
+        },
+        {
+          "name": "product_name",
+          "type": "categorical",
+          "description": "Product stored in warehouse"
+        },
+        {
+          "name": "stock_units",
+          "type": "numerical",
+          "description": "Available stock units"
+        },
+        {
+          "name": "reorder_level",
+          "type": "numerical",
+          "description": "Minimum threshold before restocking"
+        },
+        {
+          "name": "physical_condition",
+          "type": "categorical",
+          "description": "Storage condition like Good, Better, Best"
+        },
+        {
+          "name": "last_restock_date",
+          "type": "datetime",
+          "description": "Date when stock was last replenished"
+        },
+        {
+          "name": "inventory_status",
+          "type": "categorical",
+          "description": "Stock status such as Normal, Low, Critical"
+        }
+      ],
+      "relationships": ["warehouse_id", "product_name"]
+    },
+    {
+      "dataset_name": "supplier_supply",
+      "purpose": "Represents supplier performance, delivery timelines, and supply fulfillment efficiency.",
+      "primary_use_cases": [
+        "Supplier Risk Analysis",
+        "Lead Time Prediction",
+        "Supply Chain Optimization"
+      ],
+      "features": [
+        {
+          "name": "supplier_id",
+          "type": "categorical",
+          "description": "Unique supplier identifier"
+        },
+        {
+          "name": "supplier_name",
+          "type": "categorical",
+          "description": "Name of supplier"
+        },
+        {
+          "name": "product_name",
+          "type": "categorical",
+          "description": "Product supplied"
+        },
+        {
+          "name": "supplier_location",
+          "type": "categorical",
+          "description": "Location of supplier"
+        },
+        {
+          "name": "ideal_supply_time_days",
+          "type": "numerical",
+          "description": "Expected delivery time in days"
+        },
+        {
+          "name": "actual_supply_time_days",
+          "type": "numerical",
+          "description": "Actual delivery time taken"
+        },
+        {
+          "name": "supply_variation_days",
+          "type": "numerical",
+          "description": "Difference between actual and ideal supply time"
+        },
+        {
+          "name": "supplier_reliability_score",
+          "type": "numerical",
+          "description": "Reliability score between 0 and 1"
+        },
+        {
+          "name": "order_quantity",
+          "type": "numerical",
+          "description": "Total units ordered"
+        },
+        {
+          "name": "fulfilled_quantity",
+          "type": "numerical",
+          "description": "Units successfully delivered"
+        },
+        {
+          "name": "fulfillment_rate",
+          "type": "numerical",
+          "description": "Ratio of fulfilled quantity to order quantity"
+        },
+        {
+          "name": "cargo_condition_status",
+          "type": "categorical",
+          "description": "Condition of goods such as Good or Damaged"
+        }
+      ],
+      "relationships": ["supplier_id", "product_name"]
+    },
+    {
+      "dataset_name": "transport_route_data",
+      "purpose": "Represents transportation routes, delivery conditions, and risk factors affecting shipment efficiency.",
+      "primary_use_cases": [
+        "Risk Assessment",
+        "Anomaly Detection",
+        "Route Optimization"
+      ],
+      "features": [
+        {
+          "name": "timestamp",
+          "type": "datetime",
+          "description": "Shipment time"
+        },
+        {
+          "name": "product_name",
+          "type": "categorical",
+          "description": "Product being transported"
+        },
+        {
+          "name": "supplier_id",
+          "type": "categorical",
+          "description": "Source supplier"
+        },
+        {
+          "name": "warehouse_id",
+          "type": "categorical",
+          "description": "Destination warehouse"
+        },
+        {
+          "name": "route_type",
+          "type": "categorical",
+          "description": "Mode of transport such as Road, Air, Sea"
+        },
+        {
+          "name": "vehicle_gps_latitude",
+          "type": "numerical",
+          "description": "Latitude of vehicle location"
+        },
+        {
+          "name": "vehicle_gps_longitude",
+          "type": "numerical",
+          "description": "Longitude of vehicle location"
+        },
+        {
+          "name": "fuel_consumption_rate",
+          "type": "numerical",
+          "description": "Fuel consumption rate"
+        },
+        {
+          "name": "traffic_congestion_level",
+          "type": "numerical",
+          "description": "Traffic intensity level (0 to 10)"
+        },
+        {
+          "name": "weather_condition_severity",
+          "type": "numerical",
+          "description": "Weather severity level (0 to 10)"
+        },
+        {
+          "name": "shipping_costs",
+          "type": "numerical",
+          "description": "Transportation cost"
+        },
+        {
+          "name": "lead_time_days",
+          "type": "numerical",
+          "description": "Expected delivery time"
+        },
+        {
+          "name": "eta_variation_hours",
+          "type": "numerical",
+          "description": "Deviation in estimated arrival time"
+        },
+        {
+          "name": "route_risk_level",
+          "type": "numerical",
+          "description": "Risk score for route"
+        },
+        {
+          "name": "delay_probability",
+          "type": "numerical",
+          "description": "Probability of delivery delay (0 to 1)"
+        },
+        {
+          "name": "risk_classification",
+          "type": "categorical",
+          "description": "Risk level such as Low, Medium, High"
+        },
+        {
+          "name": "delivery_time_deviation",
+          "type": "numerical",
+          "description": "Actual delay or early delivery time"
+        }
+      ],
+      "relationships": ["supplier_id", "warehouse_id", "product_name", "timestamp"]
+    }
+  ]
+}
