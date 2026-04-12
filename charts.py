@@ -235,39 +235,70 @@ def risk_3d_scatter(df: pd.DataFrame, x_col: str, y_col: str, z_col: str,
     return fig
 
 
+import plotly.graph_objects as go
+import pandas as pd
+
 def supplier_3d_bar(df: pd.DataFrame, supplier_col: str, product_col: str,
-                    value_col: str, title="3D Supplier Performance") -> go.Figure:
-    """3D bar (mesh) for supplier × product performance matrix."""
-    pivot = df.pivot_table(index=supplier_col, columns=product_col, values=value_col,
-                           aggfunc="mean").fillna(0)
+                   value_col: str, title="3D Supplier Performance") -> go.Figure:
+    
+    pivot = df.pivot_table(
+        index=supplier_col,
+        columns=product_col,
+        values=value_col,
+        aggfunc="mean"
+    ).fillna(0)
+
     suppliers = list(pivot.index)
-    products  = list(pivot.columns)
-    x, y, z = [], [], []
-    dx, dy = 0.7, 0.7
+    products = list(pivot.columns)
+
+    x, y, z, text = [], [], [], []
+
     for i, sup in enumerate(suppliers):
         for j, prod in enumerate(products):
-            x.append(i); y.append(j); z.append(pivot.loc[sup, prod])
+            val = pivot.loc[sup, prod]
+            x.append(i)
+            y.append(j)
+            z.append(val)
+            text.append(f"{sup}<br>{prod}<br>{val:.2f}")
 
-    colors = [GREEN if v > 0.85 else AMBER if v > 0.6 else RED for v in z]
-    fig = go.Figure(go.Bar3d(
-        x=x, y=y, z=[0]*len(z),
-        dx=[dx]*len(x), dy=[dy]*len(y), dz=z,
-        opacity=0.85, text=[f"{v:.2f}" for v in z],
-        colorscale=[[0, RED], [0.5, AMBER], [1, GREEN]],
-        color=z, showscale=True,
-        colorbar=dict(title=value_col, tickfont=dict(color="#c5d8f0"))
-    ))
+    fig = go.Figure(data=[
+        go.Scatter3d(
+            x=x,
+            y=y,
+            z=z,
+            mode='markers',
+            marker=dict(
+                size=10,
+                color=z,
+                colorscale=[[0, "red"], [0.5, "orange"], [1, "green"]],
+                opacity=0.9,
+                colorbar=dict(title=value_col)
+            ),
+            text=text,
+            hoverinfo='text'
+        )
+    ])
+
     fig.update_layout(
-        **DARK_LAYOUT, title=dict(text=title, font=dict(color=CYAN)), height=540,
+        title=title,
+        height=550,
         scene=dict(
-            xaxis=dict(title="Supplier", tickvals=list(range(len(suppliers))),
-                       ticktext=suppliers, gridcolor="rgba(255,255,255,0.05)"),
-            yaxis=dict(title="Product", tickvals=list(range(len(products))),
-                       ticktext=products, gridcolor="rgba(255,255,255,0.05)"),
-            zaxis=dict(title=value_col.replace("_", " ").title(), gridcolor="rgba(255,255,255,0.05)"),
-            bgcolor="rgba(6,8,15,0.0)",
+            xaxis=dict(
+                title="Supplier",
+                tickvals=list(range(len(suppliers))),
+                ticktext=suppliers
+            ),
+            yaxis=dict(
+                title="Product",
+                tickvals=list(range(len(products))),
+                ticktext=products
+            ),
+            zaxis=dict(
+                title=value_col.replace("_", " ").title()
+            )
         )
     )
+
     return fig
 
 
