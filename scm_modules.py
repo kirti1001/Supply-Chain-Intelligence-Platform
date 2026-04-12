@@ -580,6 +580,36 @@ def _supplier_overview(df: pd.DataFrame):
 #  ROUTE OPTIMIZATION
 # ════════════════════════════════════════════════════════════════════════════
 
+#mean function for all dtype
+
+def safe_mean(series: pd.Series, default=0.0) -> float:
+    """Compute mean safely regardless of dtype."""
+    
+    if series is None or len(series) == 0:
+        return default
+
+    # Case 1: timedelta → convert to days
+    if pd.api.types.is_timedelta64_dtype(series):
+        val = series.dt.total_seconds() / 86400  # convert to days
+        mean_val = val.mean()
+
+    # Case 2: datetime → not meaningful → return default
+    elif pd.api.types.is_datetime64_any_dtype(series):
+        return default
+
+    # Case 3: numeric
+    elif pd.api.types.is_numeric_dtype(series):
+        mean_val = series.mean()
+
+    # Case 4: object / mixed → try convert
+    else:
+        val = pd.to_numeric(series, errors="coerce")
+        mean_val = val.mean()
+
+    return float(mean_val) if pd.notna(mean_val) else default
+
+
+
 def render_route_optimization():
     st.markdown("## 🚛 Route Optimization")
     st.caption("Analyze transport routes, delay patterns, fuel efficiency, and cost optimization paths.")
@@ -645,7 +675,7 @@ def render_route_optimization():
             "avg_delay_prob": float(df["delay_probability"].mean()) if "delay_probability" in df.columns else 0,
             "avg_cost":       float(df["shipping_costs"].mean()) if "shipping_costs" in df.columns else 0,
             "high_risk_pct":  float((df["risk_classification"].str.lower() == "high").mean() * 100) if "risk_classification" in df.columns else 0,
-            "avg_lead_time":  float(df["lead_time_days"].mean()) if "lead_time_days" in df.columns else 0,
+            "avg_lead_time": safe_mean(df.get("lead_time_days")) if "lead_time_days" in df.columns else 0,
         }
         with st.spinner("🧠 AI route optimization…"):
             ai_result = agent_route_optimization(route_data, nl_query)
