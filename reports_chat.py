@@ -176,6 +176,49 @@ def _show_recent_reports():
 #  CHATBOT AGENT
 # ════════════════════════════════════════════════════════════════════════════
 
+
+def render_ai_response(response: str):
+    """Render AI response in clean UI format."""
+
+    try:
+        data = json.loads(response)
+    except:
+        # fallback if it's plain text
+        st.markdown(response)
+        return
+
+    # ── Main Answer ─────────────────────────
+    if "response" in data:
+        st.markdown("### 💡 Answer")
+        st.markdown(data["response"])
+
+    # ── Recommended Analysis ────────────────
+    if "recommended_analysis" in data:
+        rec = data["recommended_analysis"]
+
+        st.markdown("### 📊 Recommended Analysis")
+
+        if "module" in rec:
+            st.markdown(f"**Module:** `{rec['module']}`")
+
+        if "description" in rec:
+            st.markdown(rec["description"])
+
+        if "steps" in rec:
+            st.markdown("#### 🔍 Steps")
+            for i, step in enumerate(rec["steps"], 1):
+                st.markdown(f"{i}. {step}")
+
+        if "output_example" in rec:
+            st.markdown("#### 📄 Example Output")
+            st.json(rec["output_example"])
+
+    # ── Next Steps ─────────────────────────
+    if "next_steps" in data:
+        st.markdown("### 🚀 Next Steps")
+        st.info(data["next_steps"])
+
+
 def render_chatbot():
     st.markdown("## 🤖 AI Supply Chain Chatbot")
     st.caption("Ask anything about your supply chain data. The agent has context from all loaded datasets and past analyses.")
@@ -216,7 +259,10 @@ def render_chatbot():
     with chat_container:
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "👤"):
-                st.markdown(msg["content"])
+                if msg["role"] == "assistant":
+                    render_ai_response(msg["content"])
+                else:
+                    st.markdown(msg["content"])
 
     # Input
     if prompt := st.chat_input("Ask your supply chain question…"):
