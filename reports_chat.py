@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import streamlit as st
 from datetime import datetime
+from data_loader import get_datasets
 
 from db_ops import (save_report, load_all, delete_document, load_by_id,
                     COLL_REPORTS, COLL_FORECAST, COLL_RISK, COLL_INVENTORY,
@@ -176,12 +177,29 @@ def _show_recent_reports():
 #  CHATBOT AGENT
 # ════════════════════════════════════════════════════════════════════════════
 
+def safe_json_load(response: str):
+    try:
+        return json.loads(response)
+    except:
+        # Try to extract JSON from text
+        import re
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except:
+                return None
+        return None
 
 def render_ai_response(response: str):
     """Render AI response in clean UI format."""
 
     try:
-        data = json.loads(response)
+        data = safe_json_load(response)
+
+        if not data:
+            st.markdown(response)
+            return
     except:
         # fallback if it's plain text
         st.markdown(response)
@@ -223,7 +241,6 @@ def render_chatbot():
     st.markdown("## 🤖 AI Supply Chain Chatbot")
     st.caption("Ask anything about your supply chain data. The agent has context from all loaded datasets and past analyses.")
 
-    from data_loader import get_datasets
     ds = get_datasets()
 
     # Build data context summary
