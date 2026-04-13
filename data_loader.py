@@ -1,27 +1,32 @@
 """
 data_loader.py — SKVision Supply Chain Intelligence Platform
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-7-Stage Pipeline — now supports MULTIPLE CSVs in Autonomous mode:
+REDESIGNED PIPELINE  v3.0  (Production-Ready)
 
-  1. DataProfilerAgent         — understand schema + sample data (per file)
-  2. SchemaMapperAgent         — map user cols → required cols (with confidence)
-  3. MultiFileIntegratorAgent  — ★ NEW: classify + smart-merge N files
-  4. RequirementValidatorAgent — check which modules have enough cols
-  5. FeatureEngineeringAgent   — derive missing cols via safe transforms
-  6. DataAssistantChatbot      — ask user if still missing (with memory)
-  7. TransformationEngine      — apply controlled (no-exec) transforms
-  8. FinalValidator            — final readiness gate + save to disk
+NEW UPLOAD FLOW:
+  Step 0  User uploads CSV(s) + optional TXT/JSON description file
+  Step 1  ColumnProfilerAgent   — analyze column names & stats ONLY (no full scan)
+  Step 2  DescriptionFusionAgent — fuse user description + column profiles via LLM
+  Step 3  SmartCombinerAgent     — best-strategy multi-file merge using LLM plan
+  Step 4  MissingFieldsAgent     — identify gaps, classify as critical/optional
+  Step 5  UI GATE: show gaps → user can upload supplement CSV or skip
+  Step 6  RequirementValidatorAgent — revalidate after any user supplement
+  Step 7  FeatureEngineeringAgent   — safe auto-derivation of remaining gaps
+  Step 8  DataAssistantChatbot      — conversational resolution of final gaps
+  Step 9  SplitterAgent             — map master → 4 canonical datasets
+  Step 10 FinalSave                 — disk + MongoDB (only finalized datasets)
 
-SAFETY: LLM never executes code directly. All transforms are
-        applied via a whitelisted set of pandas operations only.
+DESIGN PRINCIPLES:
+  • LLM receives ONLY column names + tiny sample (≤ 10 rows) — never full CSV
+  • LLM calls are sequential, batched per stage — never overlapping
+  • Each stage result is cached in session_state; re-running only touched stages
+  • 4 canonical datasets are saved separately: demand / inventory / supplier / transport
+  • Auto-restore from disk/DB on startup; no re-processing of unchanged datasets
+  • Classic upload mode retained for backward compatibility
 
-MULTI-FILE STRATEGY:
-  • Each uploaded CSV is individually profiled + schema-mapped.
-  • MultiFileIntegratorAgent classifies each file as demand/inventory/
-    supplier/transport/mixed and determines the best merge strategy
-    (join on shared keys, concat on matching schema, or stack columns).
-  • The merged "master" DataFrame flows through the rest of the pipeline
-    exactly like a single-CSV upload — all downstream agents unchanged.
+SAFETY:
+  • All transforms via whitelisted safe ops only (no exec/eval)
+  • LLM JSON responses validated before use
 """
 
 from __future__ import annotations
@@ -40,12 +45,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from db_ops import save_result, COLL_UPLOADS
+from db_ops import save_result, load_all, COLL_UPLOADS
 
-# ── Logger ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger("data_loader")
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -62,13 +65,12 @@ ALL_REQUIRED_COLS: list[str] = [
     "shipping_costs", "lead_time_days", "risk_classification",
 ]
 
-# These are always computed, never block a module
 DERIVED_COLS: set[str] = {
     "demand_risk_scores", "inventory_risk_scores",
     "supplier_risk_scores", "transport_risk_scores",
 }
 
-# Per-module minimum columns needed
+# Per-module minimum columns
 MODULE_REQUIREMENTS: dict[str, list[str]] = {
     "demand_forecast":      ["timestamp", "product_name", "units_sold"],
     "risk_assessment":      ["product_name"],
@@ -80,39 +82,67 @@ MODULE_REQUIREMENTS: dict[str, list[str]] = {
     "report":               ["product_name"],
 }
 
-PREPARED_DIR = Path("dataset/prepared")
+# CRITICAL = blocks core modules; OPTIONAL = nice-to-have
+CRITICAL_COLS: set[str] = {
+    "timestamp", "product_name", "units_sold", "stock_units",
+    "supplier_name", "route_type",
+}
 
-# Domain→signature columns (used by classifier + classic mode)
+CANONICAL_DOMAINS: list[str] = ["demand", "inventory", "supplier", "transport"]
+
+# Signature columns per domain (for classifier + saver)
 SCHEMA_HINTS: dict[str, list[str]] = {
     "demand":    ["timestamp", "product_name", "units_sold"],
     "inventory": ["warehouse_id", "product_name", "stock_units", "reorder_level"],
-    "supplier":  ["supplier_id", "product_name", "fulfillment_rate",
-                  "supplier_reliability_score"],
-    "transport": ["timestamp", "product_name", "supplier_id",
-                  "warehouse_id", "route_type"],
+    "supplier":  ["supplier_id", "product_name", "fulfillment_rate", "supplier_reliability_score"],
+    "transport": ["timestamp", "product_name", "supplier_id", "warehouse_id", "route_type"],
 }
 
-# Natural-language join-key candidates per domain pair
+PREPARED_DIR   = Path("dataset/prepared")
+CANONICAL_DIR  = Path("dataset/canonical")
+
 _JOIN_CANDIDATES: list[str] = [
-    "product_name", "product_id", "sku", "item", "item_name",
+    "product_name", "product_id", "sku", "item_name",
     "supplier_id", "supplier_name", "warehouse_id", "order_id",
     "timestamp", "date",
 ]
 
-# Whitelisted safe transform operations
 _SAFE_OPS: set[str] = {
     "rename", "fill_constant", "fill_from_col", "compute_ratio",
     "compute_diff", "compute_product", "clip", "to_lower",
     "map_values", "derive_status", "log1p", "rolling_mean", "date_extract",
 }
 
+_HEURISTICS: dict[str, list[str]] = {
+    "timestamp":                  ["timestamp","date","time","dt","order_date","sale_date","trans_date","created_at"],
+    "product_name":               ["product_name","product","item","sku","item_name","product_desc","article"],
+    "units_sold":                 ["units_sold","quantity","qty","sales","demand","volume","sold","qty_sold","sales_qty"],
+    "warehouse_id":               ["warehouse_id","warehouse","wh_id","depot","location_id","wh_code","store_id"],
+    "stock_units":                ["stock_units","stock","inventory","on_hand","available","qty_on_hand","closing_stock","balance_qty"],
+    "reorder_level":              ["reorder_level","reorder","min_stock","min_qty","safety_stock","reorder_point","rop"],
+    "inventory_status":           ["inventory_status","stock_status","status","stock_level","inv_status"],
+    "supplier_name":              ["supplier_name","supplier","vendor","vendor_name","supplier_company"],
+    "supplier_id":                ["supplier_id","supplier_code","vendor_id","sup_id"],
+    "fulfillment_rate":           ["fulfillment_rate","fill_rate","order_fill","service_level","fulfilment_rate"],
+    "supplier_reliability_score": ["supplier_reliability_score","reliability","reliability_score","perf_score","vendor_score"],
+    "supply_variation_days":      ["supply_variation_days","lead_variance","delay_days","supply_delay","variation_days"],
+    "cargo_condition_status":     ["cargo_condition_status","cargo_condition","condition","quality_status","damage_status"],
+    "route_type":                 ["route_type","mode","transport_mode","shipment_mode","carrier_type","delivery_mode"],
+    "delay_probability":          ["delay_probability","delay_prob","on_time_risk","delay_risk","prob_delay"],
+    "route_risk_level":           ["route_risk_level","risk_level","route_risk","risk_score","route_score"],
+    "delivery_time_deviation":    ["delivery_time_deviation","delay","time_deviation","schedule_deviation","late_days"],
+    "fuel_consumption_rate":      ["fuel_consumption_rate","fuel_rate","fuel","fuel_consumption","fuel_used"],
+    "shipping_costs":             ["shipping_costs","freight","shipping","transport_cost","logistics_cost","freight_cost"],
+    "lead_time_days":             ["lead_time_days","lead_time","delivery_days","transit_days","procurement_days"],
+    "risk_classification":        ["risk_classification","risk_class","risk_category","risk_tier","risk_label"],
+}
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  SAFE LLM WRAPPER
+#  SAFE LLM WRAPPER  (sequential, batched, never blocking)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _llm(messages: list[dict], json_mode: bool = False,
-         max_tokens: int = 2000) -> str:
+def _llm(messages: list[dict], json_mode: bool = False, max_tokens: int = 1500) -> str:
     try:
         from llm_agents import llm_call
         return llm_call(messages, json_mode=json_mode, max_tokens=max_tokens)
@@ -140,13 +170,17 @@ def _parse(text: str) -> dict:
     return {}
 
 
+def _ts() -> str:
+    return datetime.datetime.utcnow().isoformat()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  STAGE 0 — Basic cleaning
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
-        if any(kw in col.lower() for kw in ("date", "time", "stamp", "_dt")):
+        if any(kw in col.lower() for kw in ("date", "time", "stamp", "_dt", "created", "updated")):
             try:
                 df[col] = pd.to_datetime(df[col], infer_datetime_format=True)
             except Exception:
@@ -175,141 +209,101 @@ def load_csv_bytes(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 1 — DataProfilerAgent
+#  STAGE 1 — ColumnProfilerAgent
+#  LLM receives ONLY: column names + dtypes + tiny sample (≤ 10 rows)
+#  NO full-dataset statistics sent to LLM — keeps token usage minimal
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def DataProfilerAgent(df: pd.DataFrame, user_description: str = "") -> dict:
+def ColumnProfilerAgent(df: pd.DataFrame, filename: str = "", user_description: str = "") -> dict:
     """
-    Statistical + LLM-semantic profiling of an arbitrary DataFrame.
-    Returns structured profile dict used by every downstream agent.
+    LLM-efficient column profiling. Sends only column metadata (not full data).
+    Returns structured profile with domain classification and column mappings.
     """
-    logger.info("[Profiler] %d rows x %d cols", len(df), df.shape[1])
+    logger.info("[ColumnProfiler] %s — %d cols", filename, df.shape[1])
 
-    col_profiles: list[dict] = []
+    # Lightweight column metadata — NO full stats
+    col_meta: list[dict] = []
     for col in df.columns:
         s = df[col]
         null_pct = round(float(s.isnull().mean() * 100), 1)
-        uniq = int(s.nunique())
-        sample = [str(v) for v in s.dropna().head(5).tolist()]
+        sample = [str(v) for v in s.dropna().head(5).tolist()]  # max 5 samples
 
         if pd.api.types.is_numeric_dtype(s):
             kind = "numeric"
-            stats: dict = {
-                "min": round(float(s.min()), 3) if not s.empty else None,
-                "max": round(float(s.max()), 3) if not s.empty else None,
-                "mean": round(float(s.mean()), 3) if not s.empty else None,
-                "std": round(float(s.std()), 3) if not s.empty else None,
-            }
         elif pd.api.types.is_datetime64_any_dtype(s):
             kind = "datetime"
-            stats = {
-                "min": str(s.min()),
-                "max": str(s.max()),
-                "range_days": int((s.max() - s.min()).days) if not s.empty else 0,
-            }
         else:
             kind = "categorical"
-            top = s.value_counts().head(5).to_dict()
-            stats = {"top_values": {str(k): int(v) for k, v in top.items()}}
 
-        col_profiles.append({
-            "column": col, "dtype": str(s.dtype), "kind": kind,
-            "null_pct": null_pct, "unique_count": uniq,
-            "sample": sample, "stats": stats,
+        col_meta.append({
+            "col": col,
+            "type": kind,
+            "null_pct": null_pct,
+            "sample": sample,
         })
 
-    safe_rows = [{k: str(v) for k, v in r.items()}
-                 for r in df.head(3).to_dict(orient="records")]
+    # Single LLM call per file — compact prompt
+    prompt = f"""Supply chain data analyst. Analyze these columns and classify this dataset.
 
-    prompt = f"""You are a supply-chain data profiler.
-Dataset: {len(df)} rows, {df.shape[1]} columns.
-User description: "{user_description or 'none'}"
-Column profiles: {json.dumps(col_profiles, default=str)[:3000]}
-Sample rows: {json.dumps(safe_rows)[:800]}
+File: "{filename}"
+User description: "{user_description or 'none provided'}"
+Rows: {len(df)}, Columns: {df.shape[1]}
 
-Respond ONLY with valid JSON:
+Column metadata (name, type, null%, sample values):
+{json.dumps(col_meta, default=str)[:2500]}
+
+Return ONLY valid JSON:
 {{
-  "dataset_type": "demand|inventory|supplier|transport|mixed|unknown",
-  "dataset_summary": "one sentence",
-  "organization_type": "retail|manufacturing|pharma|logistics|generic",
+  "domain": "demand|inventory|supplier|transport|mixed",
+  "org_type": "retail|manufacturing|pharma|logistics|ecommerce|generic",
+  "summary": "one line description",
   "has_timeseries": true,
-  "date_column": "col_name or null",
-  "product_column": "col_name or null",
-  "quantity_column": "col_name or null",
   "likely_join_keys": ["col_name"],
-  "columns": [
-    {{
-      "column": "original_col_name",
-      "semantic": "what this means in supply chain",
-      "maps_to": "required_col_name or null",
-      "confidence": 0.0,
-      "notes": ""
-    }}
+  "mappings": [
+    {{"col": "original_col", "maps_to": "required_col_or_null", "confidence": 0.0}}
   ]
-}}"""
+}}
 
-    raw = _llm([{"role": "user", "content": prompt}], json_mode=True)
-    llm_profile = _parse(raw)
+Required columns to map to: {ALL_REQUIRED_COLS}"""
+
+    raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=1200))
 
     return {
-        "row_count": len(df),
-        "col_count": df.shape[1],
+        "filename": filename,
+        "rows": len(df),
+        "cols": df.shape[1],
         "columns": df.columns.tolist(),
-        "col_profiles": col_profiles,
-        "llm_profile": llm_profile,
-        "user_description": user_description,
-        "profiled_at": datetime.datetime.utcnow().isoformat(),
+        "col_meta": col_meta,
+        "llm": raw,
+        "profiled_at": _ts(),
     }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  STAGE 2 — SchemaMapperAgent
+#  Heuristic + LLM fused column → required mapping
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_HEURISTICS: dict[str, list[str]] = {
-    "timestamp":                  ["timestamp","date","time","dt","order_date","sale_date","trans_date"],
-    "product_name":               ["product_name","product","item","sku","item_name","product_desc"],
-    "units_sold":                 ["units_sold","quantity","qty","sales","demand","volume","sold","qty_sold"],
-    "warehouse_id":               ["warehouse_id","warehouse","wh_id","depot","location_id","wh_code"],
-    "stock_units":                ["stock_units","stock","inventory","on_hand","available","qty_on_hand","closing_stock"],
-    "reorder_level":              ["reorder_level","reorder","min_stock","min_qty","safety_stock","reorder_point"],
-    "inventory_status":           ["inventory_status","stock_status","status","stock_level","inv_status"],
-    "supplier_name":              ["supplier_name","supplier","vendor","vendor_name","supplier_company"],
-    "supplier_id":                ["supplier_id","supplier_code","vendor_id","sup_id"],
-    "fulfillment_rate":           ["fulfillment_rate","fill_rate","order_fill","service_level","fulfilment_rate"],
-    "supplier_reliability_score": ["supplier_reliability_score","reliability","reliability_score","perf_score","vendor_score"],
-    "supply_variation_days":      ["supply_variation_days","lead_variance","delay_days","supply_delay","variation_days"],
-    "cargo_condition_status":     ["cargo_condition_status","cargo_condition","condition","quality_status","damage_status"],
-    "route_type":                 ["route_type","mode","transport_mode","shipment_mode","carrier_type","delivery_mode"],
-    "delay_probability":          ["delay_probability","delay_prob","on_time_risk","delay_risk","prob_delay"],
-    "route_risk_level":           ["route_risk_level","risk_level","route_risk","risk_score","route_score"],
-    "delivery_time_deviation":    ["delivery_time_deviation","delay","time_deviation","schedule_deviation","late_days"],
-    "fuel_consumption_rate":      ["fuel_consumption_rate","fuel_rate","fuel","fuel_consumption","fuel_used"],
-    "shipping_costs":             ["shipping_costs","freight","shipping","transport_cost","logistics_cost","freight_cost"],
-    "lead_time_days":             ["lead_time_days","lead_time","delivery_days","transit_days","procurement_days"],
-    "risk_classification":        ["risk_classification","risk_class","risk_category","risk_tier","risk_label"],
-}
-
 
 def SchemaMapperAgent(profile: dict) -> dict:
     """
     Map original column names → required column names.
-    Priority: exact match > LLM suggestion (conf≥0.65) > heuristic fuzzy.
+    Pass 1: LLM suggestions ≥ 0.65 confidence
+    Pass 2: Heuristic keyword match
+    Pass 3: Exact name match (highest priority)
     """
-    logger.info("[SchemaMapper] Mapping columns…")
-    llm_cols: list[dict] = profile.get("llm_profile", {}).get("columns", [])
     orig_cols: list[str] = profile.get("columns", [])
+    llm_maps:  list[dict] = profile.get("llm", {}).get("mappings", [])
 
     mapping:    dict[str, str | None] = {c: None for c in ALL_REQUIRED_COLS}
     confidence: dict[str, float]      = {c: 0.0  for c in ALL_REQUIRED_COLS}
 
     lower_orig = {c.lower(): c for c in orig_cols}
 
-    # Pass 1 — LLM suggestions ≥0.65
-    for lc in llm_cols:
-        orig   = lc.get("column", "")
-        req    = lc.get("maps_to")
-        conf   = float(lc.get("confidence", 0.0))
+    # Pass 1 — LLM suggestions
+    for m in llm_maps:
+        orig = m.get("col", "")
+        req  = m.get("maps_to")
+        conf = float(m.get("confidence", 0.0))
         if req and req in mapping and conf >= 0.65 and orig in orig_cols:
             if conf > confidence[req]:
                 mapping[req]    = orig
@@ -332,230 +326,297 @@ def SchemaMapperAgent(profile: dict) -> dict:
             if mapping[req_col]:
                 break
 
-    # Pass 3 — Exact name match (highest priority, overrides everything)
+    # Pass 3 — Exact match (override)
     for req_col in ALL_REQUIRED_COLS:
         if req_col in lower_orig:
             mapping[req_col]    = lower_orig[req_col]
             confidence[req_col] = 1.0
 
     mapped = sum(1 for v in mapping.values() if v is not None)
-    logger.info("[SchemaMapper] Mapped %d/%d", mapped, len(ALL_REQUIRED_COLS))
     return {
-        "mapping": mapping,
-        "confidence": confidence,
-        "mapped_count": mapped,
+        "mapping":       mapping,
+        "confidence":    confidence,
+        "mapped_count":  mapped,
         "total_required": len(ALL_REQUIRED_COLS),
     }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 3 (NEW) — MultiFileIntegratorAgent
+#  STAGE 3 — DescriptionFusionAgent
+#  Parse optional user-uploaded description file (TXT/JSON)
+#  and fuse with column profiles for richer context
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _classify_file_domain(df: pd.DataFrame, profile: dict) -> str:
+def DescriptionFusionAgent(
+    profiles: list[dict],
+    user_text_description: str = "",
+    dataset_description_json: str = "",
+) -> dict:
     """
-    Heuristic + LLM-backed domain classification for a single DataFrame.
-    Returns one of: demand | inventory | supplier | transport | mixed
+    ONE LLM call to fuse all file profiles + user description into a
+    global context document. Used to guide downstream agents.
+    Sends only column names and metadata — no row data.
     """
-    # 1. LLM says so
-    llm_type = profile.get("llm_profile", {}).get("dataset_type", "")
-    if llm_type in ("demand", "inventory", "supplier", "transport"):
-        return llm_type
+    if not user_text_description and not dataset_description_json:
+        return {"context": "", "org_type": "generic", "domain_map": {}}
 
-    # 2. Heuristic signature matching
-    cols = set(df.columns.str.lower())
-    scores: dict[str, int] = {}
-    for domain, hints in SCHEMA_HINTS.items():
-        scores[domain] = sum(1 for h in hints if h in cols)
-    best = max(scores, key=lambda d: scores[d])
-    if scores[best] >= 2:
-        return best
-    return "mixed"
+    summary_per_file = []
+    for p in profiles:
+        summary_per_file.append({
+            "file": p.get("filename"),
+            "cols": p.get("columns", []),
+            "domain": p.get("llm", {}).get("domain", "unknown"),
+            "summary": p.get("llm", {}).get("summary", ""),
+        })
+
+    desc = user_text_description or ""
+    if dataset_description_json:
+        try:
+            parsed_desc = json.loads(dataset_description_json)
+            # Extract dataset feature names to aid mapping
+            for ds_item in parsed_desc.get("datasets", []):
+                desc += f"\nDataset '{ds_item.get('dataset_name','')}': "
+                desc += ", ".join(f.get("name","") for f in ds_item.get("features", []))
+        except Exception:
+            desc += "\n" + dataset_description_json[:1500]
+
+    prompt = f"""You are a supply chain data integration expert.
+
+User-provided description:
+{desc[:2000]}
+
+Files uploaded (column names only):
+{json.dumps(summary_per_file, default=str)[:2000]}
+
+Based on the description and column names, return ONLY valid JSON:
+{{
+  "org_type": "retail|manufacturing|pharma|logistics|ecommerce|generic",
+  "global_context": "2-3 sentence summary of what this data covers",
+  "domain_map": {{"filename": "demand|inventory|supplier|transport|mixed"}},
+  "key_entities": ["product", "supplier", "warehouse"],
+  "join_strategy": "how files should be joined",
+  "missing_hints": ["columns that seem absent but are described in the docs"]
+}}"""
+
+    raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=800))
+    return {
+        "context":    raw.get("global_context", ""),
+        "org_type":   raw.get("org_type", "generic"),
+        "domain_map": raw.get("domain_map", {}),
+        "join_strategy": raw.get("join_strategy", ""),
+        "missing_hints": raw.get("missing_hints", []),
+        "key_entities": raw.get("key_entities", []),
+    }
 
 
-def _find_join_keys(dfs: dict[str, pd.DataFrame]) -> list[str]:
-    """
-    Find column names present in ≥2 DataFrames — candidates for merging.
-    Prefer semantically important keys (product_name, supplier_id, etc.).
-    """
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  STAGE 4 — SmartCombinerAgent
+#  LLM plans the merge strategy; Python executes it safely
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _find_shared_keys(dfs: dict[str, pd.DataFrame]) -> list[str]:
     from collections import Counter
     col_counter: Counter = Counter()
     for df in dfs.values():
         col_counter.update(set(df.columns.str.lower()))
-
-    # Columns in at least 2 files
     shared = {c for c, cnt in col_counter.items() if cnt >= 2}
-    # Prioritise known join keys
     priority = [k for k in _JOIN_CANDIDATES if k in shared]
     others   = sorted(shared - set(priority))
     return priority + others
 
 
-def _merge_two(
+def _safe_merge(
     left: pd.DataFrame,
     right: pd.DataFrame,
     join_keys: list[str],
     how: str = "outer",
 ) -> pd.DataFrame:
-    """
-    Merge two DataFrames on the best available shared key.
-    Falls back to concat if no shared key found.
-    """
     left_cols  = set(left.columns.str.lower())
     right_cols = set(right.columns.str.lower())
-    usable_keys = [k for k in join_keys if k in left_cols and k in right_cols]
+    usable = [k for k in join_keys if k in left_cols and k in right_cols]
 
-    if usable_keys:
-        key = usable_keys[0]
-        logger.info("[Integrator] Merging on key='%s' (%s)", key, how)
+    if usable:
+        key = usable[0]
         try:
-            merged = pd.merge(left, right, on=key, how=how,
-                              suffixes=("", f"__{right.shape[1]}r"))
-            # Drop suffix duplicates that add no info
-            dup_cols = [c for c in merged.columns if c.endswith(f"__{right.shape[1]}r")]
-            merged.drop(columns=dup_cols, inplace=True, errors="ignore")
+            merged = pd.merge(left, right, on=key, how=how, suffixes=("", "_dup"))
+            dup_cols = [c for c in merged.columns if c.endswith("_dup")]
+            for dup in dup_cols:
+                base = dup[:-4]
+                if base in merged.columns:
+                    merged[base] = merged[base].combine_first(merged[dup])
+                merged.drop(columns=[dup], inplace=True)
+            logger.info("[Merge] on '%s': %d rows", key, len(merged))
             return merged
-        except Exception as exc:
-            logger.warning("[Integrator] Merge failed (%s), falling back to concat", exc)
+        except Exception as e:
+            logger.warning("[Merge] failed on '%s': %s — falling back to concat", key, e)
 
-    # Schema-concat: both have same columns → stack rows
-    if set(left.columns) == set(right.columns):
-        logger.info("[Integrator] Schema match → concat rows")
-        return pd.concat([left, right], ignore_index=True)
-
-    # Last resort: concat columns (wide join)
-    logger.info("[Integrator] No common key → concat columns")
-    min_rows = min(len(left), len(right))
-    return pd.concat(
-        [left.iloc[:min_rows].reset_index(drop=True),
-         right.iloc[:min_rows].reset_index(drop=True)],
-        axis=1,
-    )
+    # Fallback: concat (align columns)
+    merged = pd.concat([left, right], axis=0, ignore_index=True)
+    logger.info("[Merge] concat fallback: %d rows", len(merged))
+    return merged
 
 
-def MultiFileIntegratorAgent(
-    files: list[tuple[str, pd.DataFrame, dict]],  # (filename, df, profile)
-) -> tuple[pd.DataFrame, dict[str, Any]]:
+def SmartCombinerAgent(
+    file_entries: list[tuple[str, pd.DataFrame, dict]],  # (name, df, profile)
+    fusion_context: dict,
+) -> tuple[pd.DataFrame, dict]:
     """
-    ★ New Stage 3 — Intelligently integrates N DataFrames into one master df.
-
-    Strategy decision tree (per-pair):
-      1. Shared key exists  → pd.merge (outer) on best key
-      2. Identical schemas  → pd.concat (stack rows = same table type)
-      3. Otherwise          → wide concat on min-row count
-
-    Returns (master_df, integration_report).
+    ONE LLM call to determine merge plan from column-level info only.
+    Python then executes the merge safely.
     """
-    if len(files) == 1:
-        fname, df, profile = files[0]
-        domain = _classify_file_domain(df, profile)
-        return df.copy(), {
-            "strategy": "single_file",
-            "files": [{"name": fname, "domain": domain,
-                       "rows": len(df), "cols": df.shape[1]}],
-            "join_keys_used": [],
-            "merge_log": [f"Single file '{fname}' — no merge needed."],
-        }
+    if len(file_entries) == 1:
+        fname, df, profile = file_entries[0]
+        return df, {"strategy": "single_file", "file": fname, "shape": list(df.shape)}
 
-    logger.info("[Integrator] Integrating %d files…", len(files))
+    # Build a compact file summary for LLM (column names only)
+    files_summary = []
+    for fname, df, profile in file_entries:
+        domain = fusion_context.get("domain_map", {}).get(fname) \
+                 or profile.get("llm", {}).get("domain", "unknown")
+        files_summary.append({
+            "file": fname,
+            "domain": domain,
+            "cols": df.columns.tolist(),
+            "rows": len(df),
+        })
 
-    # Classify each file
-    classified: dict[str, dict] = {}
-    for fname, df, profile in files:
-        domain = _classify_file_domain(df, profile)
-        classified[fname] = {
-            "domain": domain, "df": df,
-            "rows": len(df), "cols": df.shape[1],
-        }
-        logger.info("[Integrator] '%s' → %s (%d rows)", fname, domain, len(df))
+    prompt = f"""Supply chain dataset merger. Plan how to combine these files.
 
-    # Group same-domain files → concat within group first
-    domain_groups: dict[str, list[pd.DataFrame]] = {}
-    for fname, meta in classified.items():
-        d = meta["domain"]
-        domain_groups.setdefault(d, []).append(meta["df"])
+Context: {fusion_context.get('context', '')[:500]}
+Join strategy hint: {fusion_context.get('join_strategy', '')}
 
-    # Within-group concat
-    domain_dfs: dict[str, pd.DataFrame] = {}
+Files (column names only):
+{json.dumps(files_summary, default=str)[:2000]}
+
+Return ONLY valid JSON:
+{{
+  "merge_order": ["file1.csv", "file2.csv"],
+  "join_key": "column_name_or_null",
+  "merge_how": "outer|inner|left",
+  "domain_assignments": {{"file1.csv": "demand"}},
+  "notes": "brief merge rationale"
+}}"""
+
+    plan = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=600))
+
+    # Execute the merge according to plan
+    domain_assignments = plan.get("domain_assignments", {})
+    merge_order = plan.get("merge_order", [f[0] for f in file_entries])
+    suggested_key = plan.get("join_key")
+
+    # Build ordered dict of dfs
+    file_map = {fname: (df, profile) for fname, df, profile in file_entries}
+    ordered  = [(f, file_map[f][0]) for f in merge_order if f in file_map]
+    # Add any files not in merge_order
+    ordered += [(f, df) for f, df, _ in file_entries if f not in [o[0] for o in ordered]]
+
+    # Determine join keys
+    ordered_dfs = {f: df for f, df in ordered}
+    shared_keys = _find_shared_keys(ordered_dfs)
+    if suggested_key and suggested_key in shared_keys:
+        shared_keys = [suggested_key] + [k for k in shared_keys if k != suggested_key]
+
     merge_log: list[str] = []
-    for domain, dfs_list in domain_groups.items():
-        if len(dfs_list) == 1:
-            domain_dfs[domain] = dfs_list[0]
-        else:
-            try:
-                stacked = pd.concat(dfs_list, ignore_index=True)
-                stacked.drop_duplicates(inplace=True)
-                domain_dfs[domain] = stacked
-                merge_log.append(
-                    f"✅ Stacked {len(dfs_list)} '{domain}' files → "
-                    f"{len(stacked):,} rows"
-                )
-            except Exception as exc:
-                domain_dfs[domain] = dfs_list[0]
-                merge_log.append(f"⚠ Could not stack '{domain}' files: {exc}")
-
-    # Find global join keys
-    join_keys = _find_join_keys(domain_dfs)
-    merge_log.append(f"🔑 Candidate join keys: {join_keys or ['none found']}")
-
-    # Cross-domain merge (reduce all domain_dfs into one master)
-    domain_order = ["demand", "inventory", "supplier", "transport", "mixed"]
-    present = [d for d in domain_order if d in domain_dfs]
-    # Any domains not in order (edge case)
-    present += [d for d in domain_dfs if d not in present]
-
-    master = domain_dfs[present[0]]
-    for i in range(1, len(present)):
-        right_domain = present[i]
-        right_df = domain_dfs[right_domain]
+    master = ordered[0][1]
+    for i in range(1, len(ordered)):
+        right_fname, right_df = ordered[i]
         n_before = len(master)
-        master = _merge_two(master, right_df, join_keys, how="outer")
+        master = _safe_merge(master, right_df, shared_keys, how=plan.get("merge_how", "outer"))
         master.drop_duplicates(inplace=True)
         master.reset_index(drop=True, inplace=True)
         merge_log.append(
-            f"✅ Merged '{present[i-1]}' + '{right_domain}' → "
-            f"{len(master):,} rows × {master.shape[1]} cols "
-            f"(was {n_before:,} rows)"
+            f"✅ Merged '{ordered[i-1][0]}' + '{right_fname}' → "
+            f"{len(master):,} rows × {master.shape[1]} cols (was {n_before:,})"
         )
 
-    # LLM sanity check on the merged result
-    cols_summary = master.columns.tolist()
-    prompt = f"""You are validating a merged supply-chain DataFrame.
-Files integrated: {[f[0] for f in files]}
-Domains detected: {list(classified.values())}
-Final columns: {cols_summary}
-Final shape: {master.shape}
-
-Reply ONLY with valid JSON:
-{{
-  "merge_quality": "good|fair|poor",
-  "warnings": ["..."],
-  "suggested_join_keys": ["..."],
-  "notes": "..."
-}}"""
-    llm_raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True))
-
     report = {
-        "strategy": "multi_file_merge",
-        "files": [
-            {"name": f[0], "domain": classified[f[0]]["domain"],
-             "rows": classified[f[0]]["rows"],
-             "cols": classified[f[0]]["cols"]}
-            for f in files
-        ],
-        "domain_groups": {d: len(dfs) for d, dfs in domain_groups.items()},
-        "join_keys_used": join_keys[:3],
-        "merge_log": merge_log,
-        "llm_assessment": llm_raw,
-        "final_shape": list(master.shape),
+        "strategy":           "multi_file_smart_merge",
+        "files":              [{"name": f, "domain": domain_assignments.get(f, "?"), "rows": len(df)} for f, df in ordered],
+        "join_keys_used":     shared_keys[:3],
+        "merge_log":          merge_log,
+        "llm_plan":           plan,
+        "final_shape":        list(master.shape),
     }
 
-    logger.info("[Integrator] Master df: %d rows × %d cols", *master.shape)
+    logger.info("[Combiner] Master: %d rows × %d cols", *master.shape)
     return master, report
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 4 — RequirementValidatorAgent
+#  STAGE 5 — MissingFieldsAgent
+#  Classify missing columns as critical / optional; suggest strategies
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def MissingFieldsAgent(
+    available_cols: list[str],
+    missing_cols:   list[str],
+    fusion_context: dict,
+) -> dict:
+    """
+    ONE LLM call to classify each missing column and suggest resolution.
+    Returns structured dict for UI gate and user dialog.
+    """
+    if not missing_cols:
+        return {"critical": [], "optional": [], "strategies": {}, "questions": []}
+
+    critical = [c for c in missing_cols if c in CRITICAL_COLS]
+    optional = [c for c in missing_cols if c not in CRITICAL_COLS]
+
+    prompt = f"""Supply chain data gap analysis.
+
+Available columns: {available_cols[:40]}
+Organization type: {fusion_context.get('org_type', 'generic')}
+Context: {fusion_context.get('context', '')[:300]}
+Missing columns: {missing_cols}
+Description hints: {fusion_context.get('missing_hints', [])}
+
+For each missing column, provide the best resolution strategy.
+Return ONLY valid JSON:
+{{
+  "analysis": [
+    {{
+      "col": "column_name",
+      "priority": "critical|optional",
+      "can_derive": true,
+      "derive_from": ["existing_col"],
+      "strategy": "rename|derive|ask_user|upload_more|fill_default",
+      "user_question": "plain English question to ask the user",
+      "default_value": null
+    }}
+  ],
+  "overall_advice": "one sentence advice to user",
+  "modules_at_risk": ["module_name"]
+}}"""
+
+    raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=1000))
+
+    analysis = raw.get("analysis", [])
+    strategies = {a["col"]: a for a in analysis if "col" in a}
+
+    # Fill in any cols the LLM missed
+    for col in missing_cols:
+        if col not in strategies:
+            strategies[col] = {
+                "col": col,
+                "priority": "critical" if col in CRITICAL_COLS else "optional",
+                "can_derive": False,
+                "strategy": "ask_user",
+                "user_question": f"How should we fill in `{col}`? (column name, formula, or type 'skip')",
+                "default_value": None,
+            }
+
+    return {
+        "critical":       critical,
+        "optional":       optional,
+        "strategies":     strategies,
+        "questions":      [strategies[c]["user_question"] for c in missing_cols if c in strategies],
+        "overall_advice": raw.get("overall_advice", ""),
+        "modules_at_risk": raw.get("modules_at_risk", []),
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  STAGE 6 — RequirementValidatorAgent
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def RequirementValidatorAgent(schema_result: dict) -> dict:
@@ -577,7 +638,6 @@ def RequirementValidatorAgent(schema_result: dict) -> dict:
     enabled = [m for m, s in module_status.items() if s["ready"]]
     blocked = [m for m, s in module_status.items() if not s["ready"]]
 
-    logger.info("[Validator] Enabled=%s  Blocked=%s", enabled, blocked)
     return {
         "module_status":    module_status,
         "enabled_modules":  enabled,
@@ -587,7 +647,8 @@ def RequirementValidatorAgent(schema_result: dict) -> dict:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 5 — FeatureEngineeringAgent
+#  STAGE 7 — FeatureEngineeringAgent
+#  Auto-derive remaining missing cols using safe pandas operations
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def FeatureEngineeringAgent(
@@ -595,21 +656,28 @@ def FeatureEngineeringAgent(
     missing_cols: list[str],
     profile: dict,
     schema_result: dict,
+    missing_analysis: dict,
 ) -> dict:
     if not missing_cols:
         return {"derivable": [], "not_derivable": [], "steps": []}
 
     logger.info("[FeatureEng] Deriving: %s", missing_cols)
-    avail = list(df.columns)
+    avail   = list(df.columns)
     mapping = schema_result["mapping"]
 
-    prompt = f"""Supply chain feature engineering task.
-Available columns: {avail}
-Missing required columns: {missing_cols}
-Current column mapping (required→original): {json.dumps({k:v for k,v in mapping.items() if v})}
-Dataset type: {profile.get('llm_profile',{}).get('dataset_type','unknown')}
+    # Use MissingFieldsAgent analysis to pre-filter derivable cols
+    strategies = missing_analysis.get("strategies", {})
+    auto_derivable = [
+        c for c in missing_cols
+        if strategies.get(c, {}).get("can_derive") and
+           strategies.get(c, {}).get("derive_from")
+    ]
 
-For EACH missing column, try to derive it from available columns.
+    prompt = f"""Supply chain feature engineering.
+Available columns: {avail}
+Missing columns to derive: {missing_cols}
+Pre-analysis (derivable): {json.dumps({c: strategies.get(c, {}) for c in auto_derivable}, default=str)[:800]}
+Column mapping (required→original): {json.dumps({k:v for k,v in mapping.items() if v}, default=str)[:600]}
 Allowed operations ONLY: {sorted(_SAFE_OPS)}
 
 Return ONLY valid JSON:
@@ -620,30 +688,27 @@ Return ONLY valid JSON:
     {{
       "target_col": "missing_col",
       "operation": "safe_op",
-      "source_cols": ["existing_col_a"],
+      "source_cols": ["existing_col"],
       "params": {{}},
       "explanation": "reason"
     }}
   ]
 }}
-
 Rules:
-- source_cols MUST be from {avail}
-- Use fill_constant with value=0 if truly unknown
+- source_cols MUST exist in: {avail}
 - supply_variation_days = actual_days - ideal_days
-- fulfillment_rate = fulfilled_qty / ordered_qty
+- fulfillment_rate = fulfilled_qty / order_qty
 - inventory_status via derive_status: stock_col vs reorder_col
-- delay_probability: fill_constant 0.3 if no data"""
+- delay_probability: fill_constant 0.3 if no data available
+- Use fill_constant for truly unknown numeric cols"""
 
-    raw  = _parse(_llm([{"role": "user", "content": prompt}],
-                       json_mode=True, max_tokens=1500))
-    result: dict = raw if raw else {}
+    raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=1200))
 
     # Safety: validate each step
     validated: list[dict] = []
-    for step in result.get("steps", []):
+    for step in raw.get("steps", []):
         op  = step.get("operation", "")
-        src = step.get("source_cols", [])
+        src = step.get("source_cols", []) or []
         if op not in _SAFE_OPS:
             logger.warning("[FeatureEng] Rejected unsafe op: %s", op)
             continue
@@ -654,13 +719,13 @@ Rules:
         else:
             logger.warning("[FeatureEng] Rejected step — src not in df: %s", src)
 
-    result["steps"] = validated
-    logger.info("[FeatureEng] %d steps validated", len(validated))
-    return result
+    raw["steps"] = validated
+    logger.info("[FeatureEng] %d validated steps", len(validated))
+    return raw
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 7 — TransformationEngine
+#  STAGE 8 — TransformationEngine  (safe pandas ops only)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def TransformationEngine(
@@ -671,7 +736,7 @@ def TransformationEngine(
     df  = df.copy()
     log: list[str] = []
 
-    # Alias mapped columns
+    # Alias mapped columns first
     for req_col, orig_col in mapping.items():
         if orig_col and orig_col in df.columns and req_col not in df.columns:
             df[req_col] = df[orig_col]
@@ -702,9 +767,7 @@ def TransformationEngine(
             elif op == "compute_ratio":
                 if len(src) >= 2 and all(c in df.columns for c in src[:2]):
                     denom = pd.to_numeric(df[src[1]], errors="coerce").replace(0, np.nan)
-                    df[target] = (
-                        pd.to_numeric(df[src[0]], errors="coerce") / denom
-                    ).fillna(0).clip(0, 1)
+                    df[target] = (pd.to_numeric(df[src[0]], errors="coerce") / denom).fillna(0).clip(0, 1)
                     log.append(f"✅ ratio: '{target}' = {src[0]} / {src[1]}")
 
             elif op == "compute_diff":
@@ -726,10 +789,8 @@ def TransformationEngine(
             elif op == "clip":
                 col = src[0] if src else None
                 if col and col in df.columns:
-                    lo = float(params.get("min",
-                               pd.to_numeric(df[col], errors="coerce").min()))
-                    hi = float(params.get("max",
-                               pd.to_numeric(df[col], errors="coerce").max()))
+                    lo = float(params.get("min", pd.to_numeric(df[col], errors="coerce").min()))
+                    hi = float(params.get("max", pd.to_numeric(df[col], errors="coerce").max()))
                     df[target] = pd.to_numeric(df[col], errors="coerce").clip(lo, hi)
                     log.append(f"✅ clip: '{target}' [{lo},{hi}]")
 
@@ -760,8 +821,7 @@ def TransformationEngine(
             elif op == "log1p":
                 col = src[0] if src else None
                 if col and col in df.columns:
-                    df[target] = np.log1p(
-                        pd.to_numeric(df[col], errors="coerce").fillna(0))
+                    df[target] = np.log1p(pd.to_numeric(df[col], errors="coerce").fillna(0))
                     log.append(f"✅ log1p: '{target}' ← log1p({col})")
 
             elif op == "rolling_mean":
@@ -782,10 +842,8 @@ def TransformationEngine(
                 if col and col in df.columns:
                     dts = pd.to_datetime(df[col], errors="coerce")
                     part_map = {
-                        "month": dts.dt.month,
-                        "year":  dts.dt.year,
-                        "dayofweek": dts.dt.dayofweek,
-                        "quarter": dts.dt.quarter,
+                        "month": dts.dt.month, "year": dts.dt.year,
+                        "dayofweek": dts.dt.dayofweek, "quarter": dts.dt.quarter,
                     }
                     if part in part_map:
                         df[target] = part_map[part]
@@ -799,151 +857,146 @@ def TransformationEngine(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 6 — DataAssistantChatbot
+#  STAGE 9 — SplitterAgent
+#  Map master DataFrame → 4 canonical domain DataFrames
+#  Save each separately for efficiency; only non-empty domains saved
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _parse_user_formula(user_msg: str, target_col: str,
-                        df_cols: list[str]) -> dict | None:
-    prompt = f"""Parse the user's instruction into a single safe transform step.
-Target column to create: '{target_col}'
-Available columns in dataset: {df_cols}
-User instruction: "{user_msg}"
-Allowed operations: {sorted(_SAFE_OPS)}
+def SplitterAgent(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """
+    Split master DataFrame into canonical domain datasets.
+    Each domain gets only the columns relevant to it (+ any shared cols).
+    Returns dict: domain → DataFrame (only populated domains).
+    """
+    cols = set(df.columns)
+    result: dict[str, pd.DataFrame] = {}
 
-Return ONLY valid JSON (null if not parseable):
-{{
-  "target_col": "{target_col}",
-  "operation": "safe_op_name",
-  "source_cols": ["existing_col"],
-  "params": {{}},
-  "explanation": "..."
-}}"""
+    domain_col_map = {
+        "demand":    ["timestamp", "product_name", "units_sold", "price_per_unit",
+                      "discount_percent", "customer_region", "demand_trend_index",
+                      "season", "event_flag", "product_category"],
+        "inventory": ["warehouse_id", "warehouse_location", "product_name", "stock_units",
+                      "reorder_level", "physical_condition", "last_restock_date", "inventory_status"],
+        "supplier":  ["supplier_id", "supplier_name", "product_name", "supplier_location",
+                      "ideal_supply_time_days", "actual_supply_time_days", "supply_variation_days",
+                      "supplier_reliability_score", "order_quantity", "fulfilled_quantity",
+                      "fulfillment_rate", "cargo_condition_status"],
+        "transport": ["timestamp", "product_name", "supplier_id", "warehouse_id", "route_type",
+                      "vehicle_gps_latitude", "vehicle_gps_longitude", "fuel_consumption_rate",
+                      "traffic_congestion_level", "weather_condition_severity", "shipping_costs",
+                      "lead_time_days", "eta_variation_hours", "route_risk_level",
+                      "delay_probability", "risk_classification", "delivery_time_deviation"],
+    }
 
-    raw = _parse(_llm([{"role": "user", "content": prompt}],
-                      json_mode=True, max_tokens=400))
-    if not raw or "operation" not in raw:
-        return None
-    if raw.get("operation") not in _SAFE_OPS:
-        return None
-    return raw
+    for domain, domain_cols in domain_col_map.items():
+        present = [c for c in domain_cols if c in cols]
+        # Also require at least one signature column
+        signature = SCHEMA_HINTS.get(domain, [])
+        has_signature = any(s in cols for s in signature)
+        if present and has_signature:
+            # Include all present domain cols + any extra cols not in any domain
+            result[domain] = df[present].copy().dropna(how="all")
+            logger.info("[Splitter] Domain '%s': %d rows × %d cols", domain, len(result[domain]), len(present))
 
+    # Fallback: if no domain matched, use master as demand
+    if not result:
+        result["demand"] = df.copy()
 
-def render_data_assistant(
-    df: pd.DataFrame,
-    missing_cols: list[str],
-    pipeline_state: dict,
-) -> tuple[pd.DataFrame, bool]:
-    if not missing_cols:
-        return df, False
-
-    KEY = "assistant_chat"
-    if KEY not in st.session_state:
-        st.session_state[KEY] = []
-        first_msg = (
-            f"👋 I need a little help to fully prepare your dataset.\n\n"
-            f"**Still missing:** {', '.join(f'`{c}`' for c in missing_cols)}\n\n"
-            "For each one you can:\n"
-            "- Type the **name** of an existing column that contains this data\n"
-            "- Give a **formula** like `fulfillment_rate = fulfilled_qty / order_qty`\n"
-            "- Say `skip` to leave it blank (that module will be disabled)\n"
-            "- Say `fill 0` to fill with a default numeric value\n\n"
-            f"Let's start — what should **`{missing_cols[0]}`** be?"
-        )
-        st.session_state[KEY].append({"role": "assistant", "content": first_msg})
-
-    chat_box = st.container(height=300)
-    with chat_box:
-        for msg in st.session_state[KEY]:
-            av = "🤖" if msg["role"] == "assistant" else "👤"
-            with st.chat_message(msg["role"], avatar=av):
-                st.markdown(msg["content"])
-
-    user_input = st.chat_input("How to derive missing column?", key="da_input")
-    needs_rerun = False
-
-    if user_input:
-        st.session_state[KEY].append({"role": "user", "content": user_input})
-
-        resolved   = st.session_state.get("assistant_resolved", set())
-        still_miss = [c for c in missing_cols if c not in resolved]
-
-        if not still_miss:
-            st.session_state[KEY].append({
-                "role": "assistant",
-                "content": "✅ All columns addressed! Refreshing pipeline…"
-            })
-            return df, True
-
-        target = still_miss[0]
-        txt    = user_input.strip()
-
-        if txt.lower() == "skip":
-            resolved.add(target)
-            st.session_state["assistant_resolved"] = resolved
-            nxt = [c for c in still_miss[1:]]
-            reply = (f"⏭ Skipped `{target}`.\nNext: **`{nxt[0]}`**?" if nxt
-                     else "✅ Done! Refreshing…")
-            needs_rerun = not bool(nxt)
-            st.session_state[KEY].append({"role": "assistant", "content": reply})
-            return df, needs_rerun
-
-        m_fill = re.match(r"fill\s+([+-]?\d*\.?\d+)", txt, re.IGNORECASE)
-        if m_fill:
-            val = float(m_fill.group(1))
-            df[target] = val
-            pipeline_state["mapping"][target] = target
-            resolved.add(target)
-            st.session_state["assistant_resolved"] = resolved
-            nxt = [c for c in still_miss[1:]]
-            reply = (f"✅ `{target}` filled with `{val}`.\nNext: **`{nxt[0]}`**?" if nxt
-                     else "🎉 All done! Refreshing pipeline…")
-            needs_rerun = not bool(nxt)
-            st.session_state[KEY].append({"role": "assistant", "content": reply})
-            return df, needs_rerun
-
-        lower_cols = {c.lower(): c for c in df.columns}
-        if txt.lower() in lower_cols:
-            actual = lower_cols[txt.lower()]
-            df[target] = df[actual]
-            pipeline_state["mapping"][target] = actual
-            resolved.add(target)
-            st.session_state["assistant_resolved"] = resolved
-            nxt = [c for c in still_miss[1:]]
-            reply = (f"✅ Mapped `{actual}` → `{target}`.\nNext: **`{nxt[0]}`**?" if nxt
-                     else "🎉 All done! Refreshing pipeline…")
-            needs_rerun = not bool(nxt)
-            st.session_state[KEY].append({"role": "assistant", "content": reply})
-            return df, needs_rerun
-
-        step = _parse_user_formula(txt, target, list(df.columns))
-        if step:
-            new_df, log = TransformationEngine(df, [step], pipeline_state.get("mapping", {}))
-            if target in new_df.columns:
-                df = new_df
-                pipeline_state["mapping"][target] = target
-                resolved.add(target)
-                st.session_state["assistant_resolved"] = resolved
-                nxt = [c for c in still_miss[1:]]
-                reply = (f"✅ Derived `{target}` ({log[-1] if log else ''}).\n"
-                         + (f"Next: **`{nxt[0]}`**?" if nxt else "🎉 All done! Refreshing…"))
-                needs_rerun = not bool(nxt)
-            else:
-                reply = (f"⚠ Couldn't derive `{target}`. "
-                         "Try a simpler formula or type a column name directly.")
-        else:
-            reply = (f"❓ I didn't understand that for `{target}`.\n"
-                     "Try: column name · formula · `skip` · `fill 0`")
-
-        st.session_state[KEY].append({"role": "assistant", "content": reply})
-
-    return df, needs_rerun
+    return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  STAGE 8 — FinalValidator
+#  STAGE 10 — FinalSave
+#  Save canonical datasets to disk + MongoDB; keep updated on re-run
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def FinalValidator(df: pd.DataFrame, _prev: dict) -> dict:
+def save_canonical_datasets(
+    datasets: dict[str, pd.DataFrame],
+    source_name: str = "dataset",
+    session_hash: str = "",
+) -> dict[str, str]:
+    """
+    Save each canonical domain dataset to disk.
+    Uses fixed filenames (overwrite) so only the latest version is kept.
+    Also saves master record to MongoDB.
+    Returns dict: domain → filepath.
+    """
+    CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+    saved_paths: dict[str, str] = {}
+
+    for domain, df in datasets.items():
+        path = CANONICAL_DIR / f"{domain}_canonical.csv"
+        df.to_csv(path, index=False)
+        saved_paths[domain] = str(path)
+        logger.info("[Save] canonical/%s.csv (%d rows)", domain, len(df))
+
+    # Write metadata manifest
+    manifest = {
+        "source": source_name,
+        "hash": session_hash,
+        "saved_at": _ts(),
+        "domains": {d: {"rows": len(df), "cols": df.shape[1]} for d, df in datasets.items()},
+        "paths": saved_paths,
+    }
+    manifest_path = CANONICAL_DIR / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    # Save to MongoDB
+    try:
+        save_result(COLL_UPLOADS, {
+            "source": source_name,
+            "session_hash": session_hash,
+            "domains": list(datasets.keys()),
+            "row_counts": {d: len(df) for d, df in datasets.items()},
+            "paths": saved_paths,
+            "type": "canonical_save",
+        })
+    except Exception as exc:
+        logger.warning("[Save] MongoDB log failed: %s", exc)
+
+    return saved_paths
+
+
+def load_canonical_datasets() -> dict[str, pd.DataFrame]:
+    """
+    Load previously saved canonical datasets from disk.
+    Returns empty dict if not found.
+    """
+    if not CANONICAL_DIR.exists():
+        return {}
+
+    datasets: dict[str, pd.DataFrame] = {}
+    for domain in CANONICAL_DOMAINS:
+        path = CANONICAL_DIR / f"{domain}_canonical.csv"
+        if path.exists():
+            try:
+                df = pd.read_csv(path)
+                df = _parse_dates(df)
+                datasets[domain] = df
+                logger.info("[Load] canonical/%s.csv (%d rows)", domain, len(df))
+            except Exception as exc:
+                logger.warning("[Load] Failed to load %s: %s", path, exc)
+
+    return datasets
+
+
+def _get_canonical_manifest() -> dict:
+    path = CANONICAL_DIR / "manifest.json"
+    if path.exists():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  STAGE 11 — FinalValidator
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def FinalValidator(df: pd.DataFrame, _prev: dict = None) -> dict:
     avail = set(df.columns)
     module_status: dict[str, dict] = {}
     for module, required in MODULE_REQUIREMENTS.items():
@@ -955,10 +1008,7 @@ def FinalValidator(df: pd.DataFrame, _prev: dict) -> dict:
         }
     enabled  = [m for m, s in module_status.items() if s["ready"]]
     blocked  = [m for m, s in module_status.items() if not s["ready"]]
-    all_miss = sorted(
-        {c for s in module_status.values() for c in s["missing"]} - DERIVED_COLS
-    )
-    logger.info("[FinalValidator] enabled=%s", enabled)
+    all_miss = sorted({c for s in module_status.values() for c in s["missing"]} - DERIVED_COLS)
     return {
         "module_status":    module_status,
         "enabled_modules":  enabled,
@@ -970,184 +1020,212 @@ def FinalValidator(df: pd.DataFrame, _prev: dict) -> dict:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  SAVE PREPARED DATASET
+#  UI COMPONENTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def save_prepared_dataset(df: pd.DataFrame, source_name: str = "dataset") -> str:
-    PREPARED_DIR.mkdir(parents=True, exist_ok=True)
-    ts   = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    slug = re.sub(r"[^\w]", "_", source_name.lower())[:30]
-    path = PREPARED_DIR / f"{slug}_{ts}.csv"
-    df.to_csv(path, index=False)
-    logger.info("[Save] %s (%d rows)", path, len(df))
-    return str(path)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MULTI-FILE PIPELINE HASH  (prevents rerunning on same file set)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def _compute_multi_hash(files_bytes: list[tuple[str, bytes]]) -> str:
-    h = hashlib.md5()
-    for name, b in sorted(files_bytes, key=lambda x: x[0]):
-        h.update(name.encode())
-        h.update(b[:4096])   # first 4 KB per file is enough for change detection
-    return h.hexdigest()
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  FULL PIPELINE ORCHESTRATOR  (multi-file aware)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def run_autonomous_pipeline(
-    dfs: list[tuple[str, pd.DataFrame]],   # [(filename, df), ...]
-    user_description: str = "",
-) -> dict:
+def _render_gap_ui(
+    ps: dict,
+    master_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, bool]:
     """
-    Runs the full 8-stage pipeline on one or more DataFrames.
-    Stage 6 (chatbot) is rendered separately in the UI.
-
-    Single-file call: pass [(filename, df)]
-    Multi-file call:  pass [(f1, df1), (f2, df2), ...]
+    UI Gate (Step 5): Show missing fields with AI-generated questions.
+    User can: upload supplemental CSV, answer questions, or skip.
+    Returns updated df and whether pipeline should re-validate.
     """
-    n = len(dfs)
-    label = f"{n} file{'s' if n > 1 else ''}"
+    missing_analysis = ps.get("missing_analysis", {})
+    still_missing    = ps.get("still_missing", [])
+    if not still_missing:
+        return master_df, False
 
-    # ── Stage 1: Profile each file individually ───────────────────────────────
-    profiles: list[dict] = []
-    file_entries: list[tuple[str, pd.DataFrame, dict]] = []
-    for i, (fname, df) in enumerate(dfs):
-        with st.spinner(f"🔍 Stage 1/{8} — Profiling '{fname}' ({i+1}/{n})…"):
-            p = DataProfilerAgent(df, user_description)
-            profiles.append(p)
-            file_entries.append((fname, df, p))
+    st.markdown("#### 🔍 Data Gap Resolution")
+    advice = missing_analysis.get("overall_advice", "")
+    if advice:
+        st.info(f"💡 {advice}")
 
-    # ── Stage 2: Schema-map each file ─────────────────────────────────────────
-    schemas: list[dict] = []
-    for i, (fname, df, profile) in enumerate(file_entries):
-        with st.spinner(f"🗺 Stage 2/8 — Mapping schema for '{fname}' ({i+1}/{n})…"):
-            schemas.append(SchemaMapperAgent(profile))
+    critical = missing_analysis.get("critical", [])
+    optional = missing_analysis.get("optional", [])
 
-    # ── Stage 3: Multi-file integration → master df ───────────────────────────
-    with st.spinner(f"🔗 Stage 3/8 — Integrating {label}…"):
-        master_df, integration_report = MultiFileIntegratorAgent(file_entries)
+    if critical:
+        st.error(f"**Critical missing columns** (block key modules): `{'`, `'.join(critical)}`")
+    if optional:
+        st.warning(f"**Optional missing columns** (reduce accuracy): `{'`, `'.join(optional)}`")
 
-    # Re-profile the merged master
-    with st.spinner("🔍 Stage 3/8 — Profiling merged dataset…"):
-        master_profile = DataProfilerAgent(master_df, user_description)
+    needs_rerun = False
 
-    # ── Stage 4 (was 3): Validate requirements on master ─────────────────────
-    with st.spinner("✅ Stage 4/8 — Validating requirements…"):
-        master_schema = SchemaMapperAgent(master_profile)
-        validation    = RequirementValidatorAgent(master_schema)
+    # Option A: Upload supplemental CSV
+    with st.expander("📎 Upload supplemental data to fill gaps", expanded=bool(critical)):
+        st.caption("Upload a CSV that contains the missing columns. It will be merged with your existing data.")
+        sup_file = st.file_uploader("Supplemental CSV", type=["csv"], key="supplemental_upload")
+        if sup_file:
+            sup_bytes = sup_file.read()
+            sup_df    = load_csv_bytes(sup_bytes, sup_file.name)
+            new_cols  = set(sup_df.columns) - set(master_df.columns)
+            overlap   = set(sup_df.columns) & set(master_df.columns)
+            st.caption(f"New columns found: {list(new_cols)} | Merge keys available: {list(overlap)[:5]}")
+            if st.button("✅ Merge supplemental data", key="btn_merge_sup"):
+                # Find best merge key
+                shared_keys = [k for k in _JOIN_CANDIDATES if k in overlap]
+                if shared_keys:
+                    master_df = _safe_merge(master_df, sup_df, shared_keys, how="left")
+                else:
+                    master_df = pd.concat([master_df, sup_df], axis=0, ignore_index=True)
+                master_df.drop_duplicates(inplace=True)
+                st.success(f"✅ Merged! New shape: {master_df.shape}")
+                needs_rerun = True
 
-    # ── Stage 5 (was 4): Feature engineering ─────────────────────────────────
-    missing = validation["all_missing_cols"]
-    fe_result: dict = {"derivable": [], "not_derivable": missing, "steps": []}
-    if missing:
-        with st.spinner(f"⚙️ Stage 5/8 — Engineering {len(missing)} features…"):
-            fe_result = FeatureEngineeringAgent(
-                master_df, missing, master_profile, master_schema
-            )
+    # Option B: Conversational resolution
+    st.markdown("#### 🤖 Data Assistant")
+    master_df, chat_rerun = render_data_assistant(master_df, still_missing, ps)
+    if chat_rerun:
+        needs_rerun = True
 
-    # ── Stage 7: Transformations ──────────────────────────────────────────────
-    with st.spinner("🔄 Stage 7/8 — Applying transforms…"):
-        df_t, t_log = TransformationEngine(
-            master_df, fe_result.get("steps", []), master_schema["mapping"]
+    return master_df, needs_rerun
+
+
+def render_data_assistant(
+    df: pd.DataFrame,
+    missing_cols: list[str],
+    pipeline_state: dict,
+) -> tuple[pd.DataFrame, bool]:
+    """Conversational assistant for resolving remaining missing columns."""
+    if not missing_cols:
+        return df, False
+
+    KEY = "assistant_chat"
+    missing_analysis = pipeline_state.get("missing_analysis", {})
+    strategies = missing_analysis.get("strategies", {})
+
+    if KEY not in st.session_state:
+        st.session_state[KEY] = []
+        first_col = missing_cols[0]
+        first_q = strategies.get(first_col, {}).get(
+            "user_question",
+            f"How should I fill in `{first_col}`? (column name, formula, `skip`, or `fill 0`)"
         )
-
-    # ── Stage 8: Final validation ─────────────────────────────────────────────
-    final_v = FinalValidator(df_t, validation)
-
-    # Build combined filename slug for saving
-    combined_name = "_".join(
-        re.sub(r"[^\w]", "_", f[0])[:12] for f in dfs[:3]
-    )
-
-    state = {
-        # Multi-file metadata
-        "filenames":          [f[0] for f in dfs],
-        "file_count":         n,
-        "integration_report": integration_report,
-        "per_file_profiles":  profiles,
-        "per_file_schemas":   schemas,
-        # Pipeline artefacts
-        "filename":           combined_name,
-        "user_description":   user_description,
-        "profile":            master_profile,
-        "schema":             master_schema,
-        "mapping":            master_schema["mapping"],
-        "validation":         validation,
-        "fe_result":          fe_result,
-        "transform_log":      t_log,
-        "final_validation":   final_v,
-        "df_transformed":     df_t,
-        "overall_ready":      final_v["overall_ready"],
-        "enabled_modules":    final_v["enabled_modules"],
-        "blocked_modules":    final_v["blocked_modules"],
-        "still_missing":      final_v["all_missing_cols"],
-        "ran_at":             datetime.datetime.utcnow().isoformat(),
-    }
-
-    if final_v["overall_ready"]:
-        state["prepared_path"] = save_prepared_dataset(df_t, combined_name)
-
-    st.session_state["pipeline_state"] = state
-    _push_datasets_from_pipeline(state)
-    return state
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  UI — Integration Report Panel  (★ new)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def render_integration_report(ps: dict) -> None:
-    """Show multi-file integration summary below the upload widget."""
-    ir = ps.get("integration_report", {})
-    if not ir or ir.get("strategy") == "single_file":
-        return
-
-    st.markdown("#### 🔗 Multi-File Integration Report")
-
-    files_meta = ir.get("files", [])
-    if files_meta:
-        cols = st.columns(min(len(files_meta), 4))
-        for i, fm in enumerate(files_meta):
-            cols[i % 4].metric(
-                label=f"📄 {fm['name'][:20]}",
-                value=fm["domain"].upper(),
-                delta=f"{fm['rows']:,} rows · {fm['cols']} cols",
+        st.session_state[KEY].append({
+            "role": "assistant",
+            "content": (
+                f"👋 I need a little help to complete your dataset.\n\n"
+                f"**Still missing:** {', '.join(f'`{c}`' for c in missing_cols)}\n\n"
+                f"**{first_col}:** {first_q}"
             )
+        })
 
-    st.markdown(f"**Strategy:** `{ir.get('strategy', 'n/a')}` | "
-                f"**Join keys:** `{', '.join(ir.get('join_keys_used', [])) or 'none'}`")
+    chat_box = st.container(height=280)
+    with chat_box:
+        for msg in st.session_state[KEY]:
+            av = "🤖" if msg["role"] == "assistant" else "👤"
+            with st.chat_message(msg["role"], avatar=av):
+                st.markdown(msg["content"])
 
-    with st.expander("📋 Merge Log", expanded=False):
-        for line in ir.get("merge_log", []):
-            if line.startswith("✅"):
-                st.success(line)
-            elif line.startswith("⚠"):
-                st.warning(line)
-            elif line.startswith("❌"):
-                st.error(line)
+    user_input = st.chat_input("Answer or provide column formula…", key="da_input")
+    needs_rerun = False
+
+    if user_input:
+        st.session_state[KEY].append({"role": "user", "content": user_input})
+        resolved = st.session_state.get("assistant_resolved", set())
+        still    = [c for c in missing_cols if c not in resolved]
+
+        if not still:
+            st.session_state[KEY].append({"role": "assistant", "content": "✅ All columns addressed!"})
+            return df, True
+
+        target = still[0]
+        txt    = user_input.strip()
+
+        if txt.lower() in ("skip", "s"):
+            resolved.add(target)
+            st.session_state["assistant_resolved"] = resolved
+            nxt = [c for c in still[1:]]
+            if nxt:
+                nxt_q = strategies.get(nxt[0], {}).get("user_question", f"How to fill `{nxt[0]}`?")
+                reply = f"⏭ Skipped `{target}`.\n\n**{nxt[0]}:** {nxt_q}"
             else:
-                st.caption(line)
+                reply = "✅ All columns addressed! Refreshing…"
+                needs_rerun = True
+            st.session_state[KEY].append({"role": "assistant", "content": reply})
 
-    llm_assess = ir.get("llm_assessment", {})
-    if llm_assess:
-        quality = llm_assess.get("merge_quality", "unknown")
-        colour  = {"good": "✅", "fair": "⚠️", "poor": "❌"}.get(quality, "ℹ️")
-        st.info(f"{colour} **Merge quality:** {quality.upper()} — "
-                f"{llm_assess.get('notes', '')}")
-        for w in llm_assess.get("warnings", []):
-            st.warning(w)
+        elif txt.lower().startswith("fill "):
+            try:
+                val_str = txt[5:].strip()
+                val = float(val_str) if val_str.replace(".", "").replace("-", "").isdigit() else val_str
+                df[target] = val
+                pipeline_state["mapping"][target] = target
+                resolved.add(target)
+                st.session_state["assistant_resolved"] = resolved
+                nxt = [c for c in still[1:]]
+                if nxt:
+                    nxt_q = strategies.get(nxt[0], {}).get("user_question", f"How to fill `{nxt[0]}`?")
+                    reply = f"✅ Set `{target}` = {val}.\n\n**{nxt[0]}:** {nxt_q}"
+                else:
+                    reply = "🎉 All done! Refreshing…"
+                    needs_rerun = True
+                st.session_state[KEY].append({"role": "assistant", "content": reply})
+            except Exception as e:
+                st.session_state[KEY].append({"role": "assistant", "content": f"⚠ Could not parse value: {e}"})
+
+        elif txt in df.columns:
+            # User typed an existing column name
+            df[target] = df[txt]
+            pipeline_state["mapping"][target] = txt
+            resolved.add(target)
+            st.session_state["assistant_resolved"] = resolved
+            nxt = [c for c in still[1:]]
+            if nxt:
+                nxt_q = strategies.get(nxt[0], {}).get("user_question", f"How to fill `{nxt[0]}`?")
+                reply = f"✅ Mapped `{target}` ← `{txt}`.\n\n**{nxt[0]}:** {nxt_q}"
+            else:
+                reply = "🎉 All done! Refreshing…"
+                needs_rerun = True
+            st.session_state[KEY].append({"role": "assistant", "content": reply})
+
+        else:
+            # Try LLM formula parsing
+            step = _parse_user_formula(txt, target, list(df.columns))
+            if step:
+                new_df, op_log = TransformationEngine(df, [step], pipeline_state.get("mapping", {}))
+                if target in new_df.columns:
+                    df = new_df
+                    pipeline_state["mapping"][target] = target
+                    resolved.add(target)
+                    st.session_state["assistant_resolved"] = resolved
+                    nxt = [c for c in still[1:]]
+                    if nxt:
+                        nxt_q = strategies.get(nxt[0], {}).get("user_question", f"How to fill `{nxt[0]}`?")
+                        reply = f"✅ Derived `{target}` ({op_log[-1] if op_log else ''}).\n\n**{nxt[0]}:** {nxt_q}"
+                    else:
+                        reply = "🎉 All done! Refreshing…"
+                        needs_rerun = True
+                    st.session_state[KEY].append({"role": "assistant", "content": reply})
+                else:
+                    st.session_state[KEY].append({"role": "assistant",
+                        "content": f"⚠ Couldn't derive `{target}`. Try a column name directly or `fill 0`."})
+            else:
+                st.session_state[KEY].append({"role": "assistant",
+                    "content": f"❓ Didn't understand that for `{target}`.\nTry: column name · formula · `skip` · `fill 0`"})
+
+    return df, needs_rerun
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  UI — Pipeline Status Panel
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _parse_user_formula(user_msg: str, target_col: str, df_cols: list[str]) -> dict | None:
+    prompt = f"""Parse this user instruction into one safe transform.
+Target column: '{target_col}'
+Available columns: {df_cols}
+Instruction: "{user_msg}"
+Allowed operations: {sorted(_SAFE_OPS)}
+Return ONLY JSON or null:
+{{"target_col": "{target_col}", "operation": "op_name", "source_cols": ["col"], "params": {{}}, "explanation": "..."}}"""
+
+    raw = _parse(_llm([{"role": "user", "content": prompt}], json_mode=True, max_tokens=300))
+    if not raw or "operation" not in raw:
+        return None
+    if raw.get("operation") not in _SAFE_OPS:
+        return None
+    return raw
+
 
 def render_pipeline_status(ps: dict) -> None:
+    """Render pipeline status panel with module readiness grid."""
     if not ps:
         return
 
@@ -1158,27 +1236,46 @@ def render_pipeline_status(ps: dict) -> None:
     miss  = fv.get("all_missing_cols", [])
 
     if ready:
-        st.success(f"✅ **Dataset Ready** — {len(ena)} modules enabled")
+        st.success(f"✅ **Dataset Ready** — {len(ena)} modules enabled, 4 canonical datasets saved")
     else:
         st.warning(f"⚠️ **Partial** — {len(ena)} modules ready, {len(blk)} need more data")
 
-    # Multi-file badge
     fc = ps.get("file_count", 1)
     if fc > 1:
-        st.info(f"🔗 **{fc} files merged** — "
-                f"{', '.join(ps.get('filenames', []))}")
+        st.info(f"🔗 **{fc} files combined** → {', '.join(ps.get('filenames', []))}")
 
-    profile = ps.get("profile", {})
-    schema  = ps.get("schema", {})
+    # Canonical datasets status
+    saved_domains = ps.get("saved_domains", {})
+    if saved_domains:
+        st.markdown("**📁 Saved Canonical Datasets:**")
+        dcols = st.columns(4)
+        for i, domain in enumerate(CANONICAL_DOMAINS):
+            if domain in saved_domains:
+                row_count = ps.get("canonical_row_counts", {}).get(domain, 0)
+                dcols[i].success(f"✅ **{domain.title()}**\n{row_count:,} rows")
+            else:
+                dcols[i].error(f"❌ **{domain.title()}**\nnot available")
+
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Rows",        f"{profile.get('row_count', 0):,}")
-    c2.metric("Columns",     f"{profile.get('col_count', 0)}")
+    profile = ps.get("master_profile", {})
+    schema  = ps.get("master_schema", {})
+    c1.metric("Rows",        f"{profile.get('rows', 0):,}")
+    c2.metric("Columns",     f"{profile.get('cols', 0)}")
     c3.metric("Cols Mapped", f"{schema.get('mapped_count', 0)}/{schema.get('total_required', 0)}")
     c4.metric("Modules On",  f"{len(ena)}/8")
     c5.metric("Missing",     f"{len(miss)}")
 
-    # Integration report (multi-file only)
-    render_integration_report(ps)
+    # Combination report
+    combo_report = ps.get("combination_report", {})
+    if combo_report and combo_report.get("strategy") != "single_file":
+        with st.expander("🔗 Combination Report", expanded=False):
+            for line in combo_report.get("merge_log", []):
+                if line.startswith("✅"):
+                    st.success(line)
+                elif line.startswith("⚠"):
+                    st.warning(line)
+                else:
+                    st.caption(line)
 
     # Module grid
     st.markdown("#### 📊 Module Readiness")
@@ -1202,43 +1299,15 @@ def render_pipeline_status(ps: dict) -> None:
                     ms += f" +{len(m2)-2}"
                 st.error(f"{ico} **{lbl}**\n\n❌ {ms}")
 
-    # Per-file schema tabs (multi-file only)
-    per_schemas = ps.get("per_file_schemas", [])
-    per_profiles = ps.get("per_file_profiles", [])
-    filenames = ps.get("filenames", [])
-    if len(per_schemas) > 1:
-        with st.expander("🗂️ Per-File Schema Mappings", expanded=False):
-            tabs = st.tabs([f"📄 {fn[:20]}" for fn in filenames])
-            for tab, fname, schema_i, profile_i in zip(
-                tabs, filenames, per_schemas, per_profiles
-            ):
-                with tab:
-                    st.caption(f"{profile_i.get('row_count',0):,} rows · "
-                               f"{profile_i.get('col_count',0)} cols · "
-                               f"domain: {profile_i.get('llm_profile',{}).get('dataset_type','?')}")
-                    m = schema_i.get("mapping", {})
-                    c = schema_i.get("confidence", {})
-                    rows = [
-                        {
-                            "Required": rc,
-                            "Mapped To": m.get(rc) or "—",
-                            "Confidence": f"{c.get(rc,0):.0%}" if m.get(rc) else "—",
-                            "Status": "✅" if m.get(rc) else "❌",
-                        }
-                        for rc in ALL_REQUIRED_COLS if m.get(rc)
-                    ]
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                                 hide_index=True)
-
     # Master mapping table
-    with st.expander("🗺️ Master Column Mapping", expanded=False):
-        mapping = ps.get("mapping", {})
-        conf    = ps.get("schema", {}).get("confidence", {})
+    with st.expander("🗺️ Column Mapping", expanded=False):
+        mapping = ps.get("master_schema", {}).get("mapping", {})
+        conf    = ps.get("master_schema", {}).get("confidence", {})
         rows = [
             {
-                "Required Column": c,
+                "Required": c,
                 "Mapped To": mapping.get(c) or "—",
-                "Confidence": f"{conf.get(c,0):.0%}" if mapping.get(c) else "—",
+                "Confidence": f"{conf.get(c, 0):.0%}" if mapping.get(c) else "—",
                 "Status": "✅" if mapping.get(c) else "❌",
             }
             for c in ALL_REQUIRED_COLS
@@ -1257,82 +1326,254 @@ def render_pipeline_status(ps: dict) -> None:
             else:
                 st.caption(line)
 
-    llm_p = ps.get("profile", {}).get("llm_profile", {})
-    if llm_p.get("dataset_summary"):
-        st.info(f"🧠 **AI Understanding:** {llm_p['dataset_summary']}")
-
-    df_t = ps.get("df_transformed")
-    if df_t is not None:
-        st.download_button(
-            "⬇️ Download Prepared Master Dataset",
-            data=df_t.to_csv(index=False).encode(),
-            file_name="skvision_prepared_master.csv",
+    # Download all canonical datasets
+    st.markdown("**⬇️ Download Canonical Datasets:**")
+    ds = get_datasets()
+    dl_cols = st.columns(len(ds)) if ds else []
+    for (domain, df_d), col in zip(ds.items(), dl_cols):
+        col.download_button(
+            f"⬇ {domain.title()}",
+            data=df_d.to_csv(index=False).encode(),
+            file_name=f"skvision_{domain}_canonical.csv",
             mime="text/csv",
-            use_container_width=True,
         )
 
 
-def render_missing_fields_panel(ps: dict) -> None:
-    miss = ps.get("still_missing", [])
-    if not miss:
-        return
-    st.markdown("#### ❓ Missing Fields")
-    fe = ps.get("fe_result", {})
-    not_der = fe.get("not_derivable", [])
-    for col in miss:
-        msg = (f"**`{col}`** — auto-derivation failed"
-               if col in not_der
-               else f"**`{col}`** — needs confirmation")
-        st.warning(msg)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  MAIN PIPELINE ORCHESTRATOR
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def run_autonomous_pipeline(
+    dfs: list[tuple[str, pd.DataFrame]],
+    user_description: str = "",
+    desc_file_content: str = "",
+) -> dict:
+    """
+    Full 11-stage pipeline. LLM is called sequentially — never concurrently.
+    Stages: Profile → Describe → Map → Combine → Gaps → Validate → Engineer
+            → Transform → Split → Validate → Save
+    """
+    n     = len(dfs)
+    label = f"{n} file{'s' if n > 1 else ''}"
+    prog  = st.progress(0, text="Starting pipeline…")
+
+    # ── Stage 1: Profile each file (column-level only) ─────────────────────
+    prog.progress(0.05, text=f"🔍 Stage 1/11 — Profiling {label}…")
+    file_entries: list[tuple[str, pd.DataFrame, dict]] = []
+    profiles: list[dict] = []
+    for i, (fname, df) in enumerate(dfs):
+        p = ColumnProfilerAgent(df, fname, user_description)
+        profiles.append(p)
+        file_entries.append((fname, df, p))
+
+    # ── Stage 2: Schema mapping per file ───────────────────────────────────
+    prog.progress(0.15, text="🗺 Stage 2/11 — Mapping schemas…")
+    per_schemas: list[dict] = []
+    for _, _, profile in file_entries:
+        per_schemas.append(SchemaMapperAgent(profile))
+
+    # ── Stage 3: Description fusion ─────────────────────────────────────────
+    prog.progress(0.22, text="📖 Stage 3/11 — Fusing descriptions…")
+    fusion_ctx = DescriptionFusionAgent(profiles, user_description, desc_file_content)
+
+    # ── Stage 4: Smart combination ──────────────────────────────────────────
+    prog.progress(0.30, text=f"🔗 Stage 4/11 — Combining {label}…")
+    master_df, combo_report = SmartCombinerAgent(file_entries, fusion_ctx)
+
+    # ── Stage 5: Profile the master ─────────────────────────────────────────
+    prog.progress(0.40, text="🔍 Stage 5/11 — Profiling combined dataset…")
+    master_profile = ColumnProfilerAgent(master_df, "master_combined", user_description)
+    master_schema  = SchemaMapperAgent(master_profile)
+
+    # ── Stage 6: Validate requirements ──────────────────────────────────────
+    prog.progress(0.48, text="✅ Stage 6/11 — Validating requirements…")
+    validation = RequirementValidatorAgent(master_schema)
+    missing    = validation["all_missing_cols"]
+
+    # ── Stage 7: Analyze missing fields ─────────────────────────────────────
+    prog.progress(0.55, text="🔍 Stage 7/11 — Analyzing data gaps…")
+    missing_analysis: dict = {"critical": [], "optional": [], "strategies": {}, "questions": []}
+    if missing:
+        missing_analysis = MissingFieldsAgent(
+            list(master_df.columns), missing, fusion_ctx
+        )
+
+    # ── Stage 8: Feature engineering ────────────────────────────────────────
+    prog.progress(0.63, text=f"⚙️ Stage 8/11 — Engineering {len(missing)} features…")
+    fe_result: dict = {"derivable": [], "not_derivable": missing, "steps": []}
+    if missing:
+        fe_result = FeatureEngineeringAgent(
+            master_df, missing, master_profile, master_schema, missing_analysis
+        )
+
+    # ── Stage 9: Transformations ─────────────────────────────────────────────
+    prog.progress(0.72, text="🔄 Stage 9/11 — Applying transforms…")
+    df_t, t_log = TransformationEngine(
+        master_df, fe_result.get("steps", []), master_schema["mapping"]
+    )
+
+    # ── Stage 10: Split into canonical domains ────────────────────────────────
+    prog.progress(0.82, text="✂️ Stage 10/11 — Splitting to canonical datasets…")
+    canonical_datasets = SplitterAgent(df_t)
+
+    # ── Stage 11: Final validation + save ────────────────────────────────────
+    prog.progress(0.90, text="💾 Stage 11/11 — Saving canonical datasets…")
+    final_v = FinalValidator(df_t)
+
+    combined_name = "_".join(re.sub(r"[^\w]", "_", f[0])[:12] for f in dfs[:3])
+    combo_hash    = _compute_multi_hash([(f[0], f[0].encode()) for f in dfs])
+
+    saved_paths = {}
+    if final_v["overall_ready"] or canonical_datasets:
+        saved_paths = save_canonical_datasets(canonical_datasets, combined_name, combo_hash)
+
+    prog.progress(1.0, text="✅ Pipeline complete!")
+    prog.empty()
+
+    state = {
+        # File metadata
+        "filenames":            [f[0] for f in dfs],
+        "file_count":           n,
+        "user_description":     user_description,
+        # Per-file artifacts
+        "per_file_profiles":    profiles,
+        "per_file_schemas":     per_schemas,
+        # Fusion context
+        "fusion_context":       fusion_ctx,
+        # Combination
+        "combination_report":   combo_report,
+        # Master artifacts
+        "master_profile":       master_profile,
+        "master_schema":        master_schema,
+        "mapping":              master_schema["mapping"],
+        "validation":           validation,
+        "missing_analysis":     missing_analysis,
+        "fe_result":            fe_result,
+        "transform_log":        t_log,
+        "final_validation":     final_v,
+        "df_transformed":       df_t,
+        # Canonical datasets
+        "canonical_datasets":   canonical_datasets,
+        "saved_domains":        saved_paths,
+        "canonical_row_counts": {d: len(df) for d, df in canonical_datasets.items()},
+        # Module flags
+        "overall_ready":        final_v["overall_ready"],
+        "enabled_modules":      final_v["enabled_modules"],
+        "blocked_modules":      final_v["blocked_modules"],
+        "still_missing":        final_v["all_missing_cols"],
+        "filename":             combined_name,
+        "ran_at":               _ts(),
+    }
+
+    st.session_state["pipeline_state"] = state
+
+    # Push canonical datasets to session
+    if canonical_datasets:
+        st.session_state["datasets"] = canonical_datasets
+    else:
+        _push_datasets_from_pipeline(state)
+
+    _log_upload([f[0] for f in dfs], canonical_datasets or {})
+    return state
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  PUBLIC UPLOAD SECTION  (★ Autonomous now accepts multiple CSVs)
+#  PUBLIC UPLOAD SECTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _compute_multi_hash(files_bytes: list[tuple[str, bytes]]) -> str:
+    h = hashlib.md5()
+    for name, b in sorted(files_bytes, key=lambda x: x[0]):
+        h.update(name.encode())
+        h.update(b[:4096])
+    return h.hexdigest()
+
 
 def render_upload_section() -> dict[str, pd.DataFrame]:
     """
-    Main upload UI.  Two modes:
-      🧠 Autonomous — 1–N CSVs, any schema, full 8-stage pipeline with
-                      automatic multi-file integration (Stage 3 new)
-      📋 Classic    — 4 pre-structured CSVs (backward compat)
+    Main upload UI.
+
+    AUTONOMOUS MODE (recommended):
+      - Upload CSV(s) + optional description file (TXT/JSON)
+      - AI profiles, combines, validates, engineers, and splits to 4 canonical datasets
+      - Persistent storage: canonical datasets saved to disk + MongoDB
+      - On re-visit, auto-restores from disk if available
+
+    CLASSIC MODE (backward compatible):
+      - Upload up to 4 pre-structured CSVs (demand/inventory/supplier/transport)
+      - Direct load with type detection, no LLM required
+      - Download + save buttons included
     """
-    st.subheader("📂 Upload Datasets")
+    st.subheader("📂 Upload Supply Chain Datasets")
+
+    # Check for existing canonical datasets
+    manifest = _get_canonical_manifest()
+    if manifest:
+        existing_domains = list(manifest.get("domains", {}).keys())
+        saved_at = manifest.get("saved_at", "")[:10]
+        if existing_domains and not st.session_state.get("datasets"):
+            st.info(
+                f"📁 Found saved canonical datasets from **{saved_at}**: "
+                f"{', '.join(existing_domains)}. Loading automatically…"
+            )
+            loaded = load_canonical_datasets()
+            if loaded:
+                st.session_state["datasets"] = loaded
+                st.success(f"✅ Auto-restored: {', '.join(f'**{d}** ({len(df):,} rows)' for d, df in loaded.items())}")
 
     mode = st.radio(
-        "Mode",
-        ["🧠 Autonomous (any CSV — AI maps & merges automatically)",
-         "📋 Classic (pre-structured 4-file upload)"],
+        "Upload Mode",
+        [
+            "🧠 Autonomous (any CSV — AI maps, combines & prepares automatically)",
+            "📋 Classic (pre-structured 4-file upload)",
+        ],
         horizontal=True,
         key="upload_mode",
     )
 
-    # ── AUTONOMOUS ─────────────────────────────────────────────────────────────
+    # ─── AUTONOMOUS ─────────────────────────────────────────────────────────
     if mode.startswith("🧠"):
         st.caption(
-            "Upload **one or more** supply chain CSV files. "
-            "The AI pipeline profiles, classifies, merges, and prepares them "
-            "into a single master dataset automatically."
+            "Upload **one or more** CSV files from any ERP, WMS, or TMS system. "
+            "The AI pipeline will profile columns, intelligently combine files, "
+            "identify gaps, and prepare 4 canonical datasets."
         )
 
-        uploaded_files = st.file_uploader(
-            "Upload CSV(s)",
-            type=["csv", "tsv"],
-            accept_multiple_files=True,   # ★ Changed: now multi-file
-            key="auto_uploader",
-        )
+        col_left, col_right = st.columns([3, 1])
+        with col_left:
+            uploaded_files = st.file_uploader(
+                "Upload CSV/TSV files",
+                type=["csv", "tsv"],
+                accept_multiple_files=True,
+                key="auto_uploader",
+            )
+        with col_right:
+            desc_file = st.file_uploader(
+                "Optional: Dataset description (TXT/JSON)",
+                type=["txt", "json"],
+                key="desc_uploader",
+                help="Upload your dataset spec/README. AI uses this to better understand column meanings.",
+            )
+
         user_desc = st.text_area(
-            "📝 Describe your datasets (optional but recommended)",
+            "📝 Describe your data (optional but recommended for better accuracy)",
             placeholder=(
-                "e.g. 'demand.csv = weekly sales by SKU; "
-                "inventory.csv = warehouse stock levels; "
-                "supplier.csv = vendor performance scores.'"
+                "e.g. 'sales.csv = weekly SKU-level sales from SAP; "
+                "wms_export.csv = warehouse stock snapshot from Oracle WMS; "
+                "vendor_kpi.csv = monthly supplier scorecard from procurement team.'"
             ),
-            height=75,
+            height=65,
             key="user_desc",
         )
 
         if not uploaded_files:
+            # Show restore option if canonical data exists
+            saved = get_datasets()
+            if saved:
+                st.markdown("**Currently loaded datasets:**")
+                rcols = st.columns(min(len(saved), 4))
+                for (domain, df), col in zip(saved.items(), rcols):
+                    col.success(f"**{domain.title()}**\n{len(df):,} rows × {df.shape[1]} cols")
             return get_datasets()
 
         # Read bytes + compute combined hash
@@ -1340,32 +1581,38 @@ def render_upload_section() -> dict[str, pd.DataFrame]:
         for uf in uploaded_files:
             b = uf.read()
             files_bytes.append((uf.name, b))
+
+        desc_content = ""
+        if desc_file:
+            desc_content = desc_file.read().decode("utf-8", errors="ignore")
+
         combo_hash = _compute_multi_hash(files_bytes)
 
         if st.session_state.get("_file_hash") != combo_hash:
             # New file set → reset pipeline
-            st.session_state["_file_hash"]          = combo_hash
-            st.session_state["pipeline_state"]      = {}
-            st.session_state["assistant_chat"]      = []
-            st.session_state["assistant_resolved"]  = set()
+            st.session_state["_file_hash"]         = combo_hash
+            st.session_state["pipeline_state"]     = {}
+            st.session_state["assistant_chat"]     = []
+            st.session_state["assistant_resolved"] = set()
 
             loaded: list[tuple[str, pd.DataFrame]] = []
             for name, raw in files_bytes:
                 df_raw = load_csv_bytes(raw, name)
                 loaded.append((name, df_raw))
-            st.session_state["_raw_dfs"] = loaded
+            st.session_state["_raw_dfs"]          = loaded
+            st.session_state["_desc_content"]     = desc_content
 
-        loaded = st.session_state.get("_raw_dfs", [])
+        loaded       = st.session_state.get("_raw_dfs", [])
+        desc_content = st.session_state.get("_desc_content", desc_content)
+
         if not loaded:
             return get_datasets()
 
         # Per-file preview
-        st.markdown(f"**{len(loaded)} file(s) loaded:**")
+        st.markdown(f"**{len(loaded)} file(s) ready:**")
         prev_cols = st.columns(min(len(loaded), 4))
         for i, (fname, df_raw) in enumerate(loaded):
-            prev_cols[i % 4].success(
-                f"📄 **{fname}**\n\n{len(df_raw):,} rows × {df_raw.shape[1]} cols"
-            )
+            prev_cols[i % 4].info(f"📄 **{fname}**\n{len(df_raw):,} rows × {df_raw.shape[1]} cols")
 
         if len(loaded) > 1:
             with st.expander("👀 Preview all files", expanded=False):
@@ -1378,12 +1625,16 @@ def render_upload_section() -> dict[str, pd.DataFrame]:
 
         if not ps:
             btn_label = (
-                f"🚀 Run Autonomous Pipeline on {len(loaded)} file(s)"
-                if len(loaded) > 1
-                else "🚀 Run Autonomous Pipeline"
+                f"🚀 Run AI Pipeline on {len(loaded)} file{'s' if len(loaded) > 1 else ''}"
             )
+            if desc_content:
+                st.caption(f"✅ Description file loaded ({len(desc_content):,} chars) — AI will use it for better mapping.")
             if st.button(btn_label, type="primary", use_container_width=True):
-                ps = run_autonomous_pipeline(loaded, user_description=user_desc)
+                ps = run_autonomous_pipeline(
+                    loaded,
+                    user_description=user_desc,
+                    desc_file_content=desc_content,
+                )
                 st.rerun()
         else:
             st.divider()
@@ -1392,44 +1643,62 @@ def render_upload_section() -> dict[str, pd.DataFrame]:
             still_miss = ps.get("still_missing", [])
             if still_miss:
                 st.divider()
-                render_missing_fields_panel(ps)
-                st.markdown("#### 🤖 Data Assistant")
                 df_t = ps.get("df_transformed", loaded[0][1])
-                df_t, needs_rerun = render_data_assistant(df_t, still_miss, ps)
+                df_t, needs_rerun = _render_gap_ui(ps, df_t)
 
                 if needs_rerun:
                     ps["df_transformed"] = df_t
-                    fv = FinalValidator(df_t, ps["final_validation"])
-                    ps.update({
-                        "final_validation": fv,
-                        "still_missing":    fv["all_missing_cols"],
-                        "enabled_modules":  fv["enabled_modules"],
-                        "overall_ready":    fv["overall_ready"],
-                    })
-                    if fv["overall_ready"]:
-                        ps["prepared_path"] = save_prepared_dataset(
-                            df_t, ps["filename"]
+                    # Re-run validation + split
+                    fv = FinalValidator(df_t)
+                    canon = SplitterAgent(df_t)
+                    saved_paths = {}
+                    if fv["overall_ready"] or canon:
+                        saved_paths = save_canonical_datasets(
+                            canon, ps["filename"],
+                            st.session_state.get("_file_hash", "")
                         )
+                    ps.update({
+                        "final_validation":   fv,
+                        "still_missing":      fv["all_missing_cols"],
+                        "enabled_modules":    fv["enabled_modules"],
+                        "overall_ready":      fv["overall_ready"],
+                        "canonical_datasets": canon,
+                        "saved_domains":      saved_paths,
+                        "canonical_row_counts": {d: len(df) for d, df in canon.items()},
+                    })
                     st.session_state["pipeline_state"] = ps
-                    _push_datasets_from_pipeline(ps)
+                    if canon:
+                        st.session_state["datasets"] = canon
+                    else:
+                        _push_datasets_from_pipeline(ps)
+                    st.session_state["assistant_chat"]     = []
+                    st.session_state["assistant_resolved"] = set()
                     st.rerun()
 
-            if st.button("🔄 Re-run Pipeline", key="btn_rerun"):
-                for k in ("pipeline_state", "assistant_chat",
-                          "assistant_resolved", "_file_hash", "_raw_dfs"):
+            if st.button("🔄 Reset & Re-run Pipeline", key="btn_rerun"):
+                for k in ("pipeline_state", "assistant_chat", "assistant_resolved",
+                          "_file_hash", "_raw_dfs", "_desc_content"):
                     st.session_state.pop(k, None)
                 st.rerun()
 
         return get_datasets()
 
-    # ── CLASSIC ────────────────────────────────────────────────────────────────
-    st.caption("Upload up to 4 CSVs: demand · inventory · supplier · transport.")
-    uploaded_files = st.file_uploader(
-        "Upload CSV files",
-        type=["csv", "tsv"],
-        accept_multiple_files=True,
-        key="classic_uploader",
-    )
+    # ─── CLASSIC ────────────────────────────────────────────────────────────
+    st.caption("Upload up to 4 pre-structured CSVs: demand · inventory · supplier · transport.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        uploaded_files = st.file_uploader(
+            "Upload CSV files",
+            type=["csv", "tsv"],
+            accept_multiple_files=True,
+            key="classic_uploader",
+        )
+    with col_b:
+        st.markdown("**Expected columns per file:**")
+        for domain, hints in SCHEMA_HINTS.items():
+            st.caption(f"**{domain.title()}:** {', '.join(hints)}")
+
     datasets: dict[str, pd.DataFrame] = {}
     if not uploaded_files:
         return st.session_state.get("datasets", {})
@@ -1446,11 +1715,31 @@ def render_upload_section() -> dict[str, pd.DataFrame]:
         prog.progress((i + 1) / len(uploaded_files))
 
     st.session_state["datasets"] = datasets
+
+    # Save to canonical dir in classic mode too
+    CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+    for domain, df in datasets.items():
+        path = CANONICAL_DIR / f"{domain}_canonical.csv"
+        df.to_csv(path, index=False)
+
     _log_upload([f.name for f in uploaded_files], datasets)
 
+    # Display metrics
+    st.markdown("**Detected Datasets:**")
     cols = st.columns(len(datasets)) if datasets else []
     for (dt, df), col in zip(datasets.items(), cols):
         col.metric(dt.upper(), f"{len(df):,} rows", f"{df.shape[1]} cols")
+
+    # Download buttons
+    dl_cols = st.columns(len(datasets)) if datasets else []
+    for (domain, df), col in zip(datasets.items(), dl_cols):
+        col.download_button(
+            f"⬇ {domain.title()}",
+            data=df.to_csv(index=False).encode(),
+            file_name=f"skvision_{domain}_canonical.csv",
+            mime="text/csv",
+            key=f"dl_classic_{domain}",
+        )
 
     return datasets
 
@@ -1460,7 +1749,7 @@ def render_upload_section() -> dict[str, pd.DataFrame]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _push_datasets_from_pipeline(ps: dict) -> None:
-    """Populate session_state["datasets"] from the unified pipeline df."""
+    """Fallback: populate session_state datasets from unified pipeline df."""
     df = ps.get("df_transformed")
     if df is None:
         return
@@ -1477,15 +1766,15 @@ def _push_datasets_from_pipeline(ps: dict) -> None:
     if not ds:
         ds["demand"] = df
     st.session_state["datasets"] = ds
-    _log_upload(ps.get("filenames", [ps.get("filename", "unknown")]), ds)
 
 
 def _detect_dtype_classic(df: pd.DataFrame) -> str:
     cols = set(df.columns.str.lower())
+    scores: dict[str, int] = {}
     for dt, req in SCHEMA_HINTS.items():
-        if all(c.lower() in cols for c in req):
-            return dt
-    return "unknown"
+        scores[dt] = sum(1 for c in req if c in cols)
+    best = max(scores, key=lambda d: scores[d])
+    return best if scores[best] >= 2 else "unknown"
 
 
 def _log_upload(filenames: list[str], datasets: dict) -> None:
@@ -1504,6 +1793,7 @@ def _log_upload(filenames: list[str], datasets: dict) -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def get_datasets() -> dict[str, pd.DataFrame]:
+    """Return currently loaded canonical datasets."""
     return st.session_state.get("datasets", {})
 
 
@@ -1517,7 +1807,7 @@ def require_dataset(dtype: str) -> pd.DataFrame | None:
         return df_t
     st.info(
         f"ℹ Upload a **{dtype}** dataset on the Home page. "
-        "In Autonomous mode a single CSV (or multi-CSV) is enough."
+        "In Autonomous mode, any CSV with relevant columns is enough."
     )
     return None
 
@@ -1534,7 +1824,22 @@ def get_pipeline_state() -> dict:
 
 
 def auto_load_reference_files() -> dict:
-    """Dev convenience: load reference CSVs if present."""
+    """
+    Startup: try canonical dir first (fastest), then dev reference CSVs.
+    Only loads if no datasets already in session.
+    """
+    # Skip if already loaded
+    if st.session_state.get("datasets"):
+        return st.session_state["datasets"]
+
+    # Try canonical datasets from previous session
+    canonical = load_canonical_datasets()
+    if canonical:
+        st.session_state["datasets"] = canonical
+        logger.info("[AutoLoad] Restored %d canonical datasets from disk", len(canonical))
+        return canonical
+
+    # Dev fallback: reference CSV paths
     paths = {
         "demand":    "/mnt/user-data/uploads/daily_product_demand.csv",
         "inventory": "/mnt/user-data/uploads/warehouse_inventory.csv",
@@ -1548,4 +1853,5 @@ def auto_load_reference_files() -> dict:
             ds[dtype] = _clean(df)
     if ds:
         st.session_state.setdefault("datasets", ds)
+        logger.info("[AutoLoad] Loaded %d reference files", len(ds))
     return ds
